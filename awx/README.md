@@ -1190,7 +1190,14 @@ once, proved optimal in its vias.
   the stack at that point (as is a change's room from it): the same plans as
   a room per choice, in a model some 30% smaller that the search proves
   sooner.
-- Crossing lanes are on different layers.
+- Crossing lanes are on different layers. On more layers than two a lane's
+  layer at a crossing is read straight off its changes' before-bits there
+  (run j where change j-1 stands before the crossing and change j does not),
+  and a crosser's via near the crossing, which takes the stack's whole room,
+  is forced one way only, off the same bits: the same plans, in a model with
+  30% fewer variables. (In the crowd diagnosis, where a lane may break its
+  room rule and the bits come loose from the places, both are read off the
+  places.)
 - No crossing and no change in the band along the source's near face, where
   the teeth stand.
 

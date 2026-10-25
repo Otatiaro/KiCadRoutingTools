@@ -1061,9 +1061,20 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 if n in YL and o_ in YL:
                     m.Add(end_y(n, k_) != end_y(o_, k_)).OnlyEnforceIf(kept(n, o_, fam='tips'))
 
-    def run_at(n, before):
+    def run_at(n, before, mono=False):
         """(more layers than two) the layer of lane n's run where `before` -- its changes before a point, in order --
-        says it is: the run after the last of them"""
+        says it is: the run after the last of them. MONO bits (a crossing's, its room rule held: the active changes a
+        prefix, in order, each its room before the crossing or past it) pick that run themselves -- run j where bit j-1
+        holds and bit j does not -- the same plans with no Element for the presolve to expand (a fifth of the presolved
+        model's variables)"""
+        if mono:
+            L_ = m.NewIntVar(0, NL - 1, '')
+            for j_ in range(1, len(before)):
+                m.AddImplication(before[j_], before[j_ - 1])
+            for j_ in range(len(before) + 1):
+                m.Add(L_ == YL[n][j_]).OnlyEnforceIf(([before[j_ - 1]] if j_ else []) +
+                                                     ([before[j_].Not()] if j_ < len(before) else []))
+            return L_
         i_ = m.NewIntVar(0, KMAX, '')
         m.Add(i_ == sum(before))
         L_ = m.NewIntVar(0, NL - 1, '')
@@ -1082,7 +1093,21 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     CU = collections.defaultdict(lambda: ([], []))   # crossed lane -> (its crossings' rooms, their demands)
     DQ = QU(2 * VNEED)
 
+    # (a crossing's before-bits are tied to the places by the room rule, which the CROWD diagnosis and a check's rules
+    # may shed: there each change's nearness, and each run, is read off the places)
+    MONO = not rules_on and not CROWD
+
     def via_near(c_, key):
+        """the crosser c_ has an active change within DQ of crossing `key`: its stacking room there whole"""
+        if MONO:
+            vb = m.NewBoolVar('')
+            # (one way: the bit only RAISES a demand, so a change near forces it and nothing more is needed -- each
+            # active change past DQ on the side of the crossing its before-bit there puts it: the same plans as the
+            # bit read both ways off the places, in a model with 30% fewer variables)
+            for x_, a_, bb_ in zip(*chg[c_], ev[c_][key]):
+                m.Add(x_ <= t[key] - DQ - 1).OnlyEnforceIf([vb.Not(), a_, bb_])
+                m.Add(x_ >= t[key] + DQ + 1).OnlyEnforceIf([vb.Not(), a_, bb_.Not()])
+            return vb
         nears = []
         for x_, a_ in zip(*chg[c_]):
             lo_b, hi_b, nb = m.NewBoolVar(''), m.NewBoolVar(''), m.NewBoolVar('')
@@ -1097,7 +1122,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         a, b = key
         if NL > 2:
             # crossing lanes DIFFER: the run each is on there (its changes before the crossing: they stand in order)
-            La_, Lb_ = run_at(a, ev[a][key]), run_at(b, ev[b][key])
+            La_, Lb_ = run_at(a, ev[a][key], MONO), run_at(b, ev[b][key], MONO)
             ct_ = m.Add(La_ != Lb_)
             ct_.OnlyEnforceIf(kept(a, b, fam='layers'))
             LAB_CT.append(ct_.Index())
