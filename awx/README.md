@@ -601,8 +601,11 @@ BUS U1->U2 K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=0|1 s
 
 `walled=` counts the arrays' other balls the step walled in (#1348): reachable
 on the board as it came, and from nowhere once the locked lanes are laid, at
-the fab ladder's finest rung -- each one's net ships open. They are named in
-the log and in the summary's `walled`.
+the fab ladder's finest rung -- each one's net ships open. The walls are the
+copper no later step moves: the bus's, the nets an earlier step protected, a
+pour's, locked copper and the pads. Another net's escape is no wall, as the
+route step takes it up and lays it again. They are named in the log and in
+the summary's `walled`.
 
 It exits 0 when every bus net it hands on is connected and clean (those it put
 back are in `refused`), and 1 when it hands on none. A bus net it does not hand

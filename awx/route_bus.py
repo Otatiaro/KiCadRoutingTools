@@ -63,6 +63,7 @@ KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catal
 import argparse
 import collections
 import contextlib
+import copy
 import io
 import json
 import math
@@ -794,9 +795,14 @@ def walled_grade(board, routed, refs, names, log=print):
     other check of the step's sees it: the bus's grade is its own nets', and the board's DRC finds no violation in a
     ball nothing reaches. Measured: imx6ulz's U2.F1 (VMEM), escaped by a stub to the array's face, a DDR lane on In2.Cu
     under the stub's end and two on F.Cu turning across it. A ball whose net has no other pad has nothing to reach and
-    is not asked. {balls, rung, walled: ['REF.PAD'], secs}"""
-    from kicad_parser import parse_kicad_pcb
+    is not asked. A WALL is copper no later step moves (fixed_nets): the bus's own, a net an earlier step protected
+    (#521), a pour's, KiCad-locked or held copper, and every pad. Another net's escape is none: the route step takes it
+    up and lays it again elsewhere -- QSPI_SCK, U1.A5 of a DDR3 bus's source, read walled with USR_BTN's B.Cu stub under
+    the ball; route.py ripped that stub, dropped a via beside the ball and laid USR_BTN again, both connected.
+    {balls, rung, walled: ['REF.PAD'], secs}"""
+    from kicad_parser import parse_kicad_pcb, is_immutable_copper
     from list_nets import escalation_rungs
+    from protected_nets import read_protected_nets
     t0 = time.time()
     bus = {short_name(n) for n in names}
     with contextlib.redirect_stdout(io.StringIO()):
@@ -812,7 +818,13 @@ def walled_grade(board, routed, refs, names, log=print):
                     if p.net_id and p.net_name and short_name(p.net_name) not in bus and p.pad_type != 'np_thru_hole'
                     and len(b_out.nets[p.net_id].pads) > 1]
 
-    def caged_on(pcb, keys):
+    def fixed_nets(pcb, path):
+        """the nets of `pcb` (the board at `path`) whose copper no later step moves: the bus's, the protected, a pour's"""
+        prot = {short_name(n) for n in read_protected_nets(os.path.splitext(path)[0] + '.kicad_pro')}
+        return {i for i, nn in pcb.nets.items() if short_name(nn.name) in bus | prot} | \
+            {z.net_id for z in (pcb.zones or []) if z.net_id}
+
+    def caged_on(pcb, keys, fixed):
         out = []
         for r in keys:
             foot = pcb.footprints.get(r)
@@ -820,14 +832,25 @@ def walled_grade(board, routed, refs, names, log=print):
                 continue
             near = _cropped(pcb, foot)
             by_num = {p.pad_number: p for p in foot.pads}
-            out += [f'{r}.{n}' for n in keys[r] if n in by_num and _caged(near, by_num[n], *rung)]
+            for n in keys[r]:
+                if n not in by_num:
+                    continue
+                # (the ball's own copper, and the walls: the rest of the copper the route step may take up)
+                walls = copy.copy(near)
+                own_ = by_num[n].net_id
+                walls.segments = [s for s in near.segments if s.net_id in fixed or s.net_id == own_
+                                  or is_immutable_copper(s)]
+                walls.vias = [v for v in near.vias if v.net_id in fixed or v.net_id == own_ or is_immutable_copper(v)]
+                if _caged(walls, by_num[n], *rung):
+                    out.append(f'{r}.{n}')
         return out
-    now = caged_on(b_out, asked)
+    now = caged_on(b_out, asked, fixed_nets(b_out, routed))
     walled = []
     if now:
         with contextlib.redirect_stdout(io.StringIO()):
             b_in = parse_kicad_pcb(board)
-        was = set(caged_on(b_in, {r: [k.split('.', 1)[1] for k in now if k.split('.', 1)[0] == r] for r in asked}))
+        was = set(caged_on(b_in, {r: [k.split('.', 1)[1] for k in now if k.split('.', 1)[0] == r] for r in asked},
+                           fixed_nets(b_in, board)))
         walled = [k for k in now if k not in was]
     out = dict(balls=sum(len(v) for v in asked.values()), rung=list(rung), walled=walled,
                secs=round(time.time() - t0, 1))
