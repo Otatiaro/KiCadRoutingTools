@@ -917,7 +917,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         # a change's room from each of its lane's crossings, along s: a STAYER's via is passed by a steep mover at an
         # angle (VR_STAY x the room), a MOVER's via sits on its own steep track (the room itself) -- the room of both
         # lanes there, a PAIR crossing the via's lane the wider by its second leg: sized by the via's lane alone, SDQ13's
-        # via stood 0.40 before SDQS1 swept across it, and the pair folded round it twice (K41)
+        # via stood 0.40 before SDQS1 swept across it, and the pair folded round it twice (K41). On more layers than two
+        # the room is ONE row each way, its size the mover/stayer bit's (the stayer's where n stays): the same plans
+        # as a row per choice
         before = {}
         for key in ev[n]:
             wide = Dv[n] + (_pairs.pitch(TRK) if (key[1] if key[0] == n else key[0]) in prs else 0.0)
@@ -926,9 +928,14 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             bits = []
             for k in range(KMAX):
                 bb = m.NewBoolVar('')
-                for h_, lit in ((h_st, stay), (h_mv, stay.Not())):
-                    m.Add(cs_[k] + h_ <= t[key]).OnlyEnforceIf([bb, lit] + kept(n, fam='room'))
-                    m.Add(cs_[k] - h_ >= t[key]).OnlyEnforceIf([bb.Not(), act[k], lit] + kept(n, fam='room'))
+                if NL > 2:
+                    h_e = h_mv + (h_st - h_mv) * ((1 - MV[key]) if key[0] == n else MV[key])
+                    m.Add(cs_[k] + h_e <= t[key]).OnlyEnforceIf([bb] + kept(n, fam='room'))
+                    m.Add(cs_[k] - h_e >= t[key]).OnlyEnforceIf([bb.Not(), act[k]] + kept(n, fam='room'))
+                else:
+                    for h_, lit in ((h_st, stay), (h_mv, stay.Not())):
+                        m.Add(cs_[k] + h_ <= t[key]).OnlyEnforceIf([bb, lit] + kept(n, fam='room'))
+                        m.Add(cs_[k] - h_ >= t[key]).OnlyEnforceIf([bb.Not(), act[k], lit] + kept(n, fam='room'))
                 m.AddImplication(bb, act[k]); bits.append(bb)
             before[key] = bits
         if NL > 2:
@@ -1095,19 +1102,25 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             ct_.OnlyEnforceIf(kept(a, b, fam='layers'))
             LAB_CT.append(ct_.Index())
             LAB[key] = (La_, Lb_)
-            for lane_, c_, mv_ in ((a, b, MV[key]), (b, a, MV[key].Not())):
+            # each side's room ONE interval, its size the mover/stayer bit's (w_move along the lane that moves, w_stay
+            # along the one that stays), shared by the stack's cumulative and the spacing on the crosser's layer: the
+            # same plans as a mover's and a stayer's interval each, in a model some 30% smaller whose search finds and
+            # proves them sooner
+            dom_t = list(m.Proto().variables[t[key].Index()].domain)
+            for lane_, c_, mv_, Lx_ in ((a, b, MV[key], Lb_), (b, a, 1 - MV[key], La_)):
                 vb = via_near(c_, key)
-                for w_, pres_ in ((w_move, mv_), (w_stay, mv_.Not())):
-                    CU[lane_][0].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_, present(pres_, lane_), ''))
-                    CU[lane_][1].append(1 + (NL - 2) * vb)
-            for l_ in range(NL):
-                for lane_, Lx_, mv_ in ((a, Lb_, MV[key]), (b, La_, MV[key].Not())):
+                sz_ = w_stay + (w_move - w_stay) * mv_
+                e_ = m.NewIntVar(dom_t[0] + min(w_move, w_stay), dom_t[-1] + max(w_move, w_stay), '')
+                m.Add(e_ == t[key] + sz_)
+                if not rules_on and not CROWD:
+                    CU[lane_][0].append(m.NewIntervalVar(t[key], sz_, e_, ''))
+                else:
+                    CU[lane_][0].append(m.NewOptionalIntervalVar(t[key], sz_, e_, present(m.NewConstant(1), lane_), ''))
+                CU[lane_][1].append(1 + (NL - 2) * vb)
+                for l_ in range(NL):
                     on_l = m.NewBoolVar('')
                     m.Add(Lx_ == l_).OnlyEnforceIf(on_l); m.Add(Lx_ != l_).OnlyEnforceIf(on_l.Not())
-                    for w_, pres_ in ((w_move, mv_), (w_stay, mv_.Not())):
-                        p_ = m.NewBoolVar('')
-                        m.AddBoolAnd([pres_, on_l]).OnlyEnforceIf(p_); m.AddBoolOr([pres_.Not(), on_l.Not(), p_])
-                        LS[(lane_, l_)].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_, present(p_, lane_), ''))
+                    LS[(lane_, l_)].append(m.NewOptionalIntervalVar(t[key], sz_, e_, present(on_l, lane_), ''))
             continue
         # crossing lanes DIFFER: tl_a ^ tl_b ^ Ca ^ Cb == 1, i.e. XOR(parity bits [+ 1 when the teeth differ]) == 1
         lits = ev[a][key] + ev[b][key]
@@ -2032,12 +2045,13 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     if FIRST:
         OK_ = (cp_model.OPTIMAL, cp_model.FEASIBLE)
 
-        def _first(model_, batches_, first_=True):
-            """a plan of `model_` in `batches_`: its first, the objective set aside (`first_`), else its best"""
+        def _first(model_, batches_, first_=True, one_=False):
+            """a plan of `model_` in `batches_`: its first, the objective set aside (`first_`), else its best; on ONE
+            worker (`one_`) where several would race to it"""
             if first_:
                 model_.ClearObjective()
             sf_ = cp_model.CpSolver()
-            sf_.parameters.num_workers = SOLVE_WORKERS
+            sf_.parameters.num_workers = 1 if one_ else SOLVE_WORKERS
             sf_.parameters.interleave_search = True
             sf_.parameters.max_num_deterministic_batches = batches_
             sf_.parameters.share_glue_clauses = False
@@ -2140,7 +2154,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 for i_ in range(len(m.Proto().variables)):
                     v_ = m.GetIntVarFromProtoIndex(i_)
                     m2_.AddHint(v_, s1_.Value(v_))
-                s2_, st2_ = _first(m2_, FIRST_BATCHES[2])
+                # (on one worker: (1)'s plan breaks the layers (2a) set, and the workers repairing it find plans in
+                # one batch -- which of them stops the search was a race, three plans in six runs of one model)
+                s2_, st2_ = _first(m2_, FIRST_BATCHES[2], one_=True)
                 msg_ += f'; (2b) the places: [{s2_.StatusName(st2_)}] {time.time() - t1_:.0f}s'
                 if st2_ in OK_:
                     msg_ += f', its plan {s2_.Value(OBJ) / W_V:.0f} -- every variable hinted'

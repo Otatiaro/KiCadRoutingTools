@@ -1185,6 +1185,11 @@ once, proved optimal in its vias.
   the braid rule holds over every triple.
 - A lane's crossings keep a pitch along a stayer and less along a mover's
   sweep; a pair's two crossings of opposite ways keep its turning run apart.
+  On more layers than two each side of a crossing is ONE room whose size the
+  mover/stayer choice sets, shared by the spacing on the crosser's layer and
+  the stack at that point (as is a change's room from it): the same plans as
+  a room per choice, in a model some 30% smaller that the search proves
+  sooner.
 - Crossing lanes are on different layers.
 - No crossing and no change in the band along the source's near face, where
   the teeth stand.
