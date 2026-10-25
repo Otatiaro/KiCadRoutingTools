@@ -770,6 +770,23 @@ left open; 45 vias, 769 mm), handed on connected and clean, in 23 minutes: its
 first round 12 minutes, the second (new ends for the four open nets, 4 left
 open again) the rest.
 
+**The three buses in one step.** The step the bus's speed is timed on: the
+three-rail board the first recipe pours, every bus on all four layers -- the
+DDR3 bus by `--joint-fanout`, the LVDS bus with U1 shared, then the USB and
+Ethernet buses as one to U4 and U3 -- each in two rounds at most:
+
+```bash
+python3 route_bus.py tmp/zynq/planes.kicad_pcb tmp/zynq/three.kicad_pcb --rounds 2 --inproc \
+    --bus U1:U2:joint:F.Cu,B.Cu,In1.Cu,In2.Cu --bus U1:U5:escape:F.Cu,B.Cu,In1.Cu,In2.Cu \
+    --bus U1:U4+U3:plain:F.Cu,B.Cu,In1.Cu,In2.Cu \
+    --clearance-ceiling 0.09 --track-width 0.15 --fanout-track-width 0.12 --via-size 0.45 --via-drill 0.3
+```
+
+The DDR3 bus routes all 46 of its nets in its first round (77 vias, 1444 mm),
+the LVDS bus 49 of its 52 (106 vias, 1086 mm), and the USB and Ethernet bus
+25 of its 26 in its second (50 vias, 845 mm), each handed on connected and
+clean: 55 minutes on a Mac running five other routes beside it.
+
 ### Building the zynq article
 
 The second bench is built from a public board: `ZYNQ7020_AD9364_V2` from
