@@ -1208,13 +1208,15 @@ once, proved optimal in its vias.
   a room per choice, in a model some 30% smaller that the search proves
   sooner.
 - Crossing lanes are on different layers. On more layers than two a lane's
-  layer at a crossing is read straight off its changes' before-bits there
-  (run j where change j-1 stands before the crossing and change j does not),
-  and a crosser's via near the crossing, which takes the stack's whole room,
-  is forced one way only, off the same bits: the same plans, in a model with
-  30% fewer variables. (In the crowd diagnosis, where a lane may break its
-  room rule and the bits come loose from the places, both are read off the
-  places.)
+  layer at a crossing is one literal per layer, exactly one, set wherever its
+  run there (run j where change j-1 stands before the crossing and change j
+  does not) is on that layer -- clauses one way, no integer for the presolve
+  to expand -- and the layers' rule and the spacing on the crosser's layer
+  read those literals; a crosser's via near the crossing, which takes the
+  stack's whole room, is forced one way only, off the same bits: the same
+  plans, in a presolved model half the size. (In the crowd diagnosis, where
+  a lane may break its room rule and the bits come loose from the places,
+  both are read off the places.)
 - No crossing and no change in the band along the source's near face, where
   the teeth stand.
 
@@ -1905,10 +1907,13 @@ via.
   lanes it still holds on one of them take at most half the room that layer
   has open across the region (on a line square to the lanes' way through it,
   the region grown by the reach, less the layer's islands and the arrays), a
-  hundred vias past that. On the LVDS bus's first 32 nets the plan ran lanes
-  on F.Cu in the 1.2 mm between U5's south face and its row of caps, a dive
-  0.33 mm off C151; with the regions the first fanout round lays every lane
-  (69 vias), where three rounds had left a net open.
+  hundred vias past that. A lane's bit on a region's layer only prices and
+  caps, so it is set one way, wherever one of its sample points' runs is on
+  that layer (the points' bits shared by the region's layers); the plan
+  reports the lanes its own runs put there. On the LVDS bus's first 32 nets
+  the plan ran lanes on F.Cu in the 1.2 mm between U5's south face and its
+  row of caps, a dive 0.33 mm off C151; with the regions the first fanout
+  round lays every lane (69 vias), where three rounds had left a net open.
 - **A pair's dive, in millimetres along its lane.** Whether a pair's dive is
   at its end, and how long its straight run is, the geometry counts along the
   lane's laid copper, not in the frame's columns. A lane running down a

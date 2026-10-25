@@ -1061,20 +1061,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 if n in YL and o_ in YL:
                     m.Add(end_y(n, k_) != end_y(o_, k_)).OnlyEnforceIf(kept(n, o_, fam='tips'))
 
-    def run_at(n, before, mono=False):
+    def run_at(n, before):
         """(more layers than two) the layer of lane n's run where `before` -- its changes before a point, in order --
-        says it is: the run after the last of them. MONO bits (a crossing's, its room rule held: the active changes a
-        prefix, in order, each its room before the crossing or past it) pick that run themselves -- run j where bit j-1
-        holds and bit j does not -- the same plans with no Element for the presolve to expand (a fifth of the presolved
-        model's variables)"""
-        if mono:
-            L_ = m.NewIntVar(0, NL - 1, '')
-            for j_ in range(1, len(before)):
-                m.AddImplication(before[j_], before[j_ - 1])
-            for j_ in range(len(before) + 1):
-                m.Add(L_ == YL[n][j_]).OnlyEnforceIf(([before[j_ - 1]] if j_ else []) +
-                                                     ([before[j_].Not()] if j_ < len(before) else []))
-            return L_
+        says it is: the run after the last of them"""
         i_ = m.NewIntVar(0, KMAX, '')
         m.Add(i_ == sum(before))
         L_ = m.NewIntVar(0, NL - 1, '')
@@ -1118,14 +1107,49 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         vb = m.NewBoolVar('')
         m.AddMaxEquality(vb, nears)
         return vb
+    # (MONO) a lane's run j on each layer, and its layer where monotone bits say -- the bits a point's, in order, the
+    # active changes a prefix: its run there is j where bit j-1 holds and bit j does not
+    run_enf = lambda before, j_: ([before[j_ - 1]] if j_ else []) + ([before[j_].Not()] if j_ < len(before) else [])
+    ZL = {}
+
+    def run_lits(n, j_):
+        """lane n's run j_ on each layer: one literal per layer, exactly one"""
+        if (n, j_) not in ZL:
+            zs_ = [m.NewBoolVar('') for _ in range(NL)]
+            for l_, z_ in enumerate(zs_):
+                m.Add(YL[n][j_] == l_).OnlyEnforceIf(z_); m.Add(YL[n][j_] != l_).OnlyEnforceIf(z_.Not())
+            m.AddExactlyOne(zs_)
+            ZL[(n, j_)] = zs_
+        return ZL[(n, j_)]
+
+    def layer_lits(n, before):
+        """lane n's layer where its monotone bits `before` put it, one literal per layer: exactly one, and set wherever
+        the run there is on that layer -- clauses one way, no Element, no integer, for the presolve to expand (the
+        layers' rule at a crossing and its spacing presence read the literals; a sixth of the presolved model's
+        constraints and two fifths of its clauses left out)"""
+        F_ = [m.NewBoolVar('') for _ in range(NL)]
+        m.AddExactlyOne(F_)
+        for j_ in range(1, len(before)):
+            m.AddImplication(before[j_], before[j_ - 1])
+        for j_ in range(len(before) + 1):
+            enf_ = run_enf(before, j_)
+            zs_ = run_lits(n, j_)
+            for l_ in range(NL):
+                m.AddBoolOr([e_.Not() for e_ in enf_] + [zs_[l_].Not(), F_[l_]])
+        return F_
     for key in t:
         a, b = key
         if NL > 2:
             # crossing lanes DIFFER: the run each is on there (its changes before the crossing: they stand in order)
-            La_, Lb_ = run_at(a, ev[a][key], MONO), run_at(b, ev[b][key], MONO)
-            ct_ = m.Add(La_ != Lb_)
-            ct_.OnlyEnforceIf(kept(a, b, fam='layers'))
-            LAB_CT.append(ct_.Index())
+            if MONO:
+                La_, Lb_ = layer_lits(a, ev[a][key]), layer_lits(b, ev[b][key])
+                for l_ in range(NL):
+                    LAB_CT.append(m.AddBoolOr([La_[l_].Not(), Lb_[l_].Not()]).Index())
+            else:
+                La_, Lb_ = run_at(a, ev[a][key]), run_at(b, ev[b][key])
+                ct_ = m.Add(La_ != Lb_)
+                ct_.OnlyEnforceIf(kept(a, b, fam='layers'))
+                LAB_CT.append(ct_.Index())
             LAB[key] = (La_, Lb_)
             # each side's room ONE interval, its size the mover/stayer bit's (w_move along the lane that moves, w_stay
             # along the one that stays), shared by the stack's cumulative and the spacing on the crosser's layer: the
@@ -1143,8 +1167,11 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                     CU[lane_][0].append(m.NewOptionalIntervalVar(t[key], sz_, e_, present(m.NewConstant(1), lane_), ''))
                 CU[lane_][1].append(1 + (NL - 2) * vb)
                 for l_ in range(NL):
-                    on_l = m.NewBoolVar('')
-                    m.Add(Lx_ == l_).OnlyEnforceIf(on_l); m.Add(Lx_ != l_).OnlyEnforceIf(on_l.Not())
+                    if MONO:
+                        on_l = Lx_[l_]
+                    else:
+                        on_l = m.NewBoolVar('')
+                        m.Add(Lx_ == l_).OnlyEnforceIf(on_l); m.Add(Lx_ != l_).OnlyEnforceIf(on_l.Not())
                     LS[(lane_, l_)].append(m.NewOptionalIntervalVar(t[key], sz_, e_, present(on_l, lane_), ''))
             continue
         # crossing lanes DIFFER: tl_a ^ tl_b ^ Ca ^ Cb == 1, i.e. XOR(parity bits [+ 1 when the teeth differ]) == 1
@@ -1453,6 +1480,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     # priced W_REGION on the region's layers there, and the lanes it holds on one of them take at most half the room
     # that layer has open across the region (W_FIRM past it)
     REGION, REG_OVER, REG_ON = [], [], []
+    RBITS, REG_SAMP = {}, {}                           # (MONO) a lane's bits at a sample point; a priced lane's points
     REF = None                                         # (the reference routes, on: SOLVE_ROOM_TIE reads them)
     if NL > 2 and (awx_settings.get('SOLVE_REGIONS') or '1') == '1':
         import numpy as np
@@ -1603,6 +1631,30 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 terms_ = []
                 for n, (ua_, ub_, _q) in sorted(near_.items()):
                     if ub_ < entry[n] or ua_ > end[n]:
+                        continue
+                    if MONO:
+                        # (one way: the bit only prices and caps, so it is set wherever a sample point's run is on the
+                        # layer and nothing more is needed -- its points' bits shared by the region's layers, the
+                        # plan's own lanes there what the plan reports)
+                        on_ = m.NewBoolVar('')
+                        qs_ = sorted({round(ua_, 3), round((ua_ + ub_) / 2, 3), round(ub_, 3)})
+                        for u_ in qs_:
+                            if (n, u_) not in RBITS:
+                                bef_ = []
+                                for x_, _a in zip(*chg[n]):
+                                    c_ = m.NewBoolVar('')
+                                    m.Add(x_ <= Q(u_)).OnlyEnforceIf(c_)
+                                    m.Add(x_ > Q(u_)).OnlyEnforceIf(c_.Not())
+                                    bef_.append(c_)
+                                for j_ in range(1, len(bef_)):
+                                    m.AddImplication(bef_[j_], bef_[j_ - 1])
+                                RBITS[(n, u_)] = bef_
+                            bef_ = RBITS[(n, u_)]
+                            for j_ in range(len(bef_) + 1):
+                                m.AddBoolOr([e_.Not() for e_ in run_enf(bef_, j_)] + [run_lits(n, j_)[L_].Not(), on_])
+                        terms_.append((n, on_))
+                        REG_ON.append(((lab_, LAYN[L_], n), on_))
+                        REG_SAMP[(lab_, LAYN[L_], n)] = (n, [Q(u_) for u_ in qs_], L_)
                         continue
                     ons_ = []
                     for u_ in sorted({round(ua_, 3), round((ua_ + ub_) / 2, 3), round(ub_, 3)}):
@@ -2175,7 +2227,13 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                     m2_.Add(tot[n] <= cnt_[n])
                 for k_, lab_ in LAB.items():
                     for n, L_ in zip(k_, lab_):
-                        m2_.Add(L_ == sp_.Value(PLV[(n, at_[(n, k_)])]))
+                        v_ = sp_.Value(PLV[(n, at_[(n, k_)])])
+                        if MONO:
+                            # (its run there on that layer, whichever run the bits put there)
+                            for j_ in range(len(ev[n][k_]) + 1):
+                                m2_.Add(YL[n][j_] == v_).OnlyEnforceIf(run_enf(ev[n][k_], j_))
+                        else:
+                            m2_.Add(L_ == v_)
                 for i_ in range(len(m.Proto().variables)):
                     v_ = m.GetIntVarFromProtoIndex(i_)
                     m2_.AddHint(v_, s1_.Value(v_))
@@ -2302,7 +2360,15 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         J['crowded'] = [n for n in M if sv.Value(CROWD[n])]
         print(f"   crowded: {len(J['crowded'])} lane(s) whose crossings break their room -- {', '.join(J['crowded'])}")
     if REG_ON:
-        J['regions'] = sorted([k_[0], k_[1], k_[2]] for k_, v_ in REG_ON if sv.Value(v_))
+        if MONO:
+            # (a lane's bit set one way: the plan's own runs at its points say whether it is there)
+            def _on_plan(k_):
+                n_, qs_, L_ = REG_SAMP[k_]
+                cs_v = [sv.Value(x_) for x_ in chg[n_][0]]
+                return any(sv.Value(YL[n_][sum(1 for x_ in cs_v if x_ <= q_)]) == L_ for q_ in qs_)
+            J['regions'] = sorted([k_[0], k_[1], k_[2]] for k_, v_ in REG_ON if _on_plan(k_))
+        else:
+            J['regions'] = sorted([k_[0], k_[1], k_[2]] for k_, v_ in REG_ON if sv.Value(v_))
         J['region_over'] = [[k_[0], k_[1], int(sv.Value(v_))] for k_, v_ in REG_OVER if sv.Value(v_)]
         print(f"   passive regions: {len(J['regions'])} of {len(REG_ON)} priced lane(s) on a region's layer"
               + (f" -- {', '.join(f'{a_} {b_} {c_}' for a_, b_, c_ in J['regions'][:12])}" if J['regions'] else '')
