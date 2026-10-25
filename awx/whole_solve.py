@@ -56,6 +56,8 @@ PLANE_RUN = int(awx_settings.get('SOLVE_PLANE_RUN') or '1')   # a lane's run on 
 #                                        between the arrays on the In1/In2 GND planes, where the human's runs none
 SOLVE_BATCHES = int(awx_settings.get('WHOLE_SOLVE_BATCHES', '100'))  # CP-SAT interleaved batches: the plan-finders' most
 PROBE_BATCHES = int(awx_settings.get('WHOLE_SOLVE_PROBE', '10'))    # the bound-raising workers' (run)
+FIRST_TWO = (awx_settings.get('SOLVE_FIRST_TWO') or '1') == '1'     # a fresh solve's FIRST PLAN in two steps (below)
+FIRST_BATCHES = (100, 50, 100)          # ...its steps' batches: the layer rule off, the layer puzzle, the places
 SOLVE_WORKERS = 4
 CHECK_WORK = 30.0                       # a check's deterministic work limit (solve(check=True)): past it, no verdict
 CHECK_RULES_MAX = 80                    # (rules=True) the core's rules dropped in turn to minimize it, at most
@@ -687,6 +689,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         if rules_on:
             return [rlit(n_, fam) for n_ in ns]
         return [CROWD[n_].Not() for n_ in ns if n_ in CROWD]
+    # (SOLVE_FIRST_TWO) a fresh solve's first plan in two steps (below): each crossing's two layers there, and the
+    # constraint that holds them apart -- emptied in the first step's copy of the model, the model itself untouched
+    FIRST = FIRST_TWO and NL > 2 and not hint and not check and not crowd
+    LAB, LAB_CT = {}, []
     # ---- geometry cuts (whole_geo.py's islands a lane could not be kept off): none of that lane's crossings in the span
     CUTS = []
     for fn_ in cuts:
@@ -1085,7 +1091,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         if NL > 2:
             # crossing lanes DIFFER: the run each is on there (its changes before the crossing: they stand in order)
             La_, Lb_ = run_at(a, ev[a][key]), run_at(b, ev[b][key])
-            m.Add(La_ != Lb_).OnlyEnforceIf(kept(a, b, fam='layers'))
+            ct_ = m.Add(La_ != Lb_)
+            ct_.OnlyEnforceIf(kept(a, b, fam='layers'))
+            LAB_CT.append(ct_.Index())
+            LAB[key] = (La_, Lb_)
             for lane_, c_, mv_ in ((a, b, MV[key]), (b, a, MV[key].Not())):
                 vb = via_near(c_, key)
                 for w_, pres_ in ((w_move, mv_), (w_stay, mv_.Not())):
@@ -2000,6 +2009,146 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         print(f'   the warm start laid out whole: [{sh.StatusName(st_h)}]'
               + (f' {sh.ObjectiveValue():.0f}, every variable hinted' if st_h in (cp_model.OPTIMAL, cp_model.FEASIBLE)
                  else ' -- its own hints alone'))
+    # ---- (SOLVE_FIRST_TWO) a fresh solve's FIRST PLAN in two steps. Where the search must find one alone it may find it
+    # late or never: on a bus of 44 lanes on four layers its first plan came at 897 s of the plan-finders' 1056 (one
+    # seed of four found none in 100 batches), and the plan the batches left was what the rest bought -- 409, 241, 217
+    # against a bound of 24. What it could not find was the LAYERS: with the rule that two crossing lanes stand on two
+    # layers switched off, a plan in seconds; with every room shrunk to a grid step, still none. So: (1) a plan with that
+    # rule off, every other rule held -- its crossings' places the board's; (2a) the LAYER PUZZLE alone on its crossings'
+    # order along each lane, no places: a layer per lane per crossing, the two at a crossing apart, at most KMAX changes
+    # a lane, one to a gap between two crossings (a via joins any two layers), and only where that gap can reach a place
+    # the lane's changes may stand (its two crossings slide within their windows -- judged by the step's own places, a
+    # crossing it laid before its lanes' windows open left the puzzle no plan -- and its via cuts kept), the ends as the
+    # model's, and priced as the solve prices (a via past two, its stub vias counted, W_OVER_X more; a change a via; a
+    # run on a plane's layer PLANE_RUN); (2b) the model with each lane's order, its layers at its crossings and its count
+    # of changes held -- the places (the count held too, or a search that stops at its first plan strews changes
+    # wherever it stopped). The puzzle has no LENGTHS: where a lane's crossings crowd a short stretch, its changes may
+    # find no room among them that the order leaves, and (2b) no plan (a bus's lanes crossing in a millimetre by the
+    # source). Its plan, one of this very model, is every variable's hint: the 44-lane bus's first solve found 79 (46
+    # vias) from it where alone it found 409 (71), and over four seeds its step laid 81 to 88 vias where alone 88 to
+    # 108, one seed leaving 14 lanes open; an eight-layer bus's proved its 48 in 78 s where alone in 284. Each step
+    # stops at its first plan, in batches, on a copy of the model (reproducible, and the model's own constraints
+    # untouched); a step with no plan leaves the solve as ever.
+    if FIRST:
+        OK_ = (cp_model.OPTIMAL, cp_model.FEASIBLE)
+
+        def _first(model_, batches_, first_=True):
+            """a plan of `model_` in `batches_`: its first, the objective set aside (`first_`), else its best"""
+            if first_:
+                model_.ClearObjective()
+            sf_ = cp_model.CpSolver()
+            sf_.parameters.num_workers = SOLVE_WORKERS
+            sf_.parameters.interleave_search = True
+            sf_.parameters.max_num_deterministic_batches = batches_
+            sf_.parameters.share_glue_clauses = False
+            sf_.parameters.share_binary_clauses = False
+            sf_.parameters.stop_after_first_solution = first_
+            return sf_, sf_.Solve(model_)
+        t1_ = time.time()
+        m1_ = m.clone()
+        for i_ in LAB_CT:
+            c_ = m1_.Proto().constraints[i_]
+            if hasattr(c_, 'Clear'):            # (an empty constraint holds nothing)
+                c_.Clear()
+            else:
+                c_.copy_from(type(c_)())
+        s1_, st1_ = _first(m1_, FIRST_BATCHES[0])
+        msg_ = f'   first plan, (1) the layer rule off: [{s1_.StatusName(st1_)}] {time.time() - t1_:.0f}s'
+        if st1_ in OK_:
+            # (2a) the layer puzzle on (1)'s order
+            ordr_ = {n: sorted((k_ for k_ in t if n in k_), key=lambda k_: (s1_.Value(t[k_]), k_)) for n in M}
+            pz_ = cp_model.CpModel()
+            PLV, at_, chg_pz, over_pz, runs_pz = {}, {}, {}, [], []
+            tab_pl = [int(i_ in PL_IDX) for i_ in range(NL)]
+            for n in M:
+                ks_ = ordr_[n]
+                for i_ in range(len(ks_) + 2):
+                    PLV[(n, i_)] = pz_.NewIntVar(0, NL - 1, '')
+                for i_, k_ in enumerate(ks_):
+                    at_[(n, k_)] = i_ + 1
+                for k_e, i_e, L_e in ((0, 0, tli[n]), (1, len(ks_) + 1, dli[n])):
+                    if (n, k_e) in VEND:
+                        for L_b in sorted(VBAN.get((n, k_e), ())):
+                            pz_.Add(PLV[(n, i_e)] != LAYN.index(L_b))
+                    else:
+                        pz_.Add(PLV[(n, i_e)] == L_e)
+                # the places its changes may stand: its window, less its via cuts (a built-in one gives way in its
+                # blocked end's windows, as the model's)
+                lo_w, hi_w = CDOM[n][0], CDOM[n][1] - 1
+                may_ = [True] * max(0, hi_w - lo_w + 1)
+                for c_ in VCUTS:
+                    if c_['lane'] == n:
+                        for x_ in range(max(lo_w, Q(c_['u'] - c_['w']) + 1), min(hi_w, Q(c_['u'] + c_['w']) - 1) + 1):
+                            if not (c_.get('built', 0) and any(lo_d <= x_ <= hi_d for lo_d, hi_d in DOG.get(n, ()))):
+                                may_[x_ - lo_w] = False
+                los_ = [lo_w] + [Q(win[k_][0]) for k_ in ks_]
+                his_ = [Q(win[k_][1]) for k_ in ks_] + [hi_w]
+                ds_ = []
+                for i_ in range(len(ks_) + 1):
+                    d_ = pz_.NewBoolVar('')
+                    pz_.Add(PLV[(n, i_)] != PLV[(n, i_ + 1)]).OnlyEnforceIf(d_)
+                    pz_.Add(PLV[(n, i_)] == PLV[(n, i_ + 1)]).OnlyEnforceIf(d_.Not())
+                    a_, b_ = max(los_[i_], lo_w), min(his_[i_], hi_w)
+                    if not any(may_[x_ - lo_w] for x_ in range(a_, b_ + 1)):
+                        pz_.Add(d_ == 0)
+                    ds_.append(d_)
+                    if PL_IDX:
+                        on_ = pz_.NewIntVar(0, 1, '')
+                        pz_.AddElement(PLV[(n, i_ + 1)], tab_pl, on_)
+                        r_ = pz_.NewBoolVar('')
+                        pz_.Add(r_ >= on_ + d_ - 1)
+                        runs_pz.append(r_)
+                if PL_IDX:
+                    on0_ = pz_.NewIntVar(0, 1, '')
+                    pz_.AddElement(PLV[(n, 0)], tab_pl, on0_)
+                    runs_pz.append(on0_)
+                pz_.Add(sum(ds_) <= KMAX)
+                if n in XO:
+                    pz_.Add(sum(ds_) >= 1)
+                ov_ = pz_.NewIntVar(0, KMAX + SV[n], '')
+                pz_.Add(ov_ >= SV[n] + sum(ds_) - VIA_PREF)
+                over_pz.append(ov_)
+                chg_pz[n] = ds_
+            for k_ in t:
+                pz_.Add(PLV[(k_[0], at_[(k_[0], k_)])] != PLV[(k_[1], at_[(k_[1], k_)])])
+            end_lv = lambda n, k_e: PLV[(n, 0 if k_e == 0 else len(ordr_[n]) + 1)]
+            for (n, k1_), (o_, k2_) in VSEP:
+                pz_.Add(end_lv(n, k1_) != end_lv(o_, k2_))
+            for (n, k_e), btw_ in sorted(Fr.tip_between.items()):
+                for o_ in btw_:
+                    if n in M and o_ in M:
+                        pz_.Add(end_lv(n, k_e) != end_lv(o_, k_e))
+            pz_.Minimize(W_OVER_X * sum(over_pz) + sum(d_ for ds_ in chg_pz.values() for d_ in ds_) + PLANE_RUN * sum(runs_pz))
+            sp_, stp_ = _first(pz_, FIRST_BATCHES[1], first_=False)
+            msg_ += f'; (2a) the layer puzzle: [{sp_.StatusName(stp_)}] {time.time() - t1_:.0f}s' + \
+                (f', {sum(sp_.Value(d_) for ds_ in chg_pz.values() for d_ in ds_)} changes, '
+                 f'{sum(sp_.Value(o_) for o_ in over_pz)} past two' if stp_ in OK_ else '')
+            if stp_ in OK_:
+                # (2b) the places: each lane held -- its order, its layers at its crossings, its count of changes
+                cnt_ = {n: sum(sp_.Value(d_) for d_ in chg_pz[n]) for n in M}
+                m2_ = m.clone()
+                for n in M:
+                    for k1_, k2_ in zip(ordr_[n], ordr_[n][1:]):
+                        if s1_.Value(t[k1_]) < s1_.Value(t[k2_]):
+                            m2_.Add(t[k1_] < t[k2_])
+                        else:
+                            m2_.Add(t[k1_] <= t[k2_])
+                    m2_.Add(tot[n] <= cnt_[n])
+                for k_, lab_ in LAB.items():
+                    for n, L_ in zip(k_, lab_):
+                        m2_.Add(L_ == sp_.Value(PLV[(n, at_[(n, k_)])]))
+                for i_ in range(len(m.Proto().variables)):
+                    v_ = m.GetIntVarFromProtoIndex(i_)
+                    m2_.AddHint(v_, s1_.Value(v_))
+                s2_, st2_ = _first(m2_, FIRST_BATCHES[2])
+                msg_ += f'; (2b) the places: [{s2_.StatusName(st2_)}] {time.time() - t1_:.0f}s'
+                if st2_ in OK_:
+                    msg_ += f', its plan {s2_.Value(OBJ) / W_V:.0f} -- every variable hinted'
+                    m.ClearHints()
+                    for i_ in range(len(m.Proto().variables)):
+                        v_ = m.GetIntVarFromProtoIndex(i_)
+                        m.AddHint(v_, s2_.Value(v_))
+        print(msg_)
     sv, st, proved, known, secs = run(SUBSOLVERS, PROBE_BATCHES)
     solve_secs = secs
     if not proved and warm is not None:
