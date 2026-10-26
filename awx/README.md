@@ -2341,14 +2341,19 @@ channels first, and the other escapes leave round it.
     gate binds.
 - **A dive given its room.** A lane that leaves its ball on the surface and
   arrives at a dog-boned ball must change layer between the arrays -- for a
-  pair, two barrels side by side through every layer. Its exit stands where
-  the lanes leaving the same ball line on the other layers start too, and
-  they fan out across the room the dive needs: the geometry keeps a change
-  room along its own lane only, so it plans them through it, the snap finds
-  no site, and the round's feedback names the lane's exit, which can only
-  move to the next line. To try:
-  - the dive's two barrels an area every other lane is held off, on every
-    layer, in the geometry;
+  pair, two barrels side by side through every layer. The geometry holds the
+  nearest lane on every layer off each side of a change, and sends a via cut
+  back where it cannot; but the solve places the change knowing only its
+  stagger from the other changes and its room from its own crossings, so,
+  told there is no room, it can only slide the change along the lane. Near
+  the arrays, where the lanes leaving the same ball lines have not fanned
+  out yet, a pair's change seldom finds its room wherever the cut leaves it.
+  To try:
+  - the solve judging the room before it places a change: a pair's change
+    held off every lane's stub end at both arrays, its own and the other
+    lanes', by the run those lanes need to fan out round its two barrels, as
+    it is held off the teeth outside the bus (see "A change near a shared
+    stub end");
   - a surface exit the ends model can take apart from the other layers' exits
     on its ball line;
   - a lane whose dive found no room given its ball's dog-bone the next round,
