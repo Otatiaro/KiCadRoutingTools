@@ -23,6 +23,7 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 from kicad_writer import add_tracks_and_vias_to_pcb, remove_segments_from_content, remove_vias_from_content  # noqa: E402
 import braid as te  # noqa: E402
 import rules as _rules  # noqa: E402
+from coherent_nets import by_key, namer  # noqa: E402  the whole route's names for nets
 
 MARGIN = 0.05                     # past the lane's clearance: the audit's bar, and a grid's rounding off it
 DIRS16 = [(math.cos(2 * math.pi * k / 16), math.sin(2 * math.pi * k / 16)) for k in range(16)]
@@ -46,11 +47,11 @@ bench = awx_settings.get('BENCH0') or awx_settings.req('BENCH')
 side = json.load(open(os.path.splitext(bench)[0] + '.plan.json'))
 pcb = parse_kicad_pcb(bench)
 n2n = {i: n.name for i, n in pcb.nets.items()}
-byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+byname = by_key(pcb)
 if VIA_AT:
     _vx, _vy = (float(v) for v in VIA_AT.split(','))
     _v0 = min(pcb.vias, key=lambda v: math.hypot(v.x - _vx, v.y - _vy))
-    nid, lane = _v0.net_id, n2n[_v0.net_id].split('/')[-1]
+    nid, lane = _v0.net_id, namer(pcb)(n2n[_v0.net_id])
     tooth = tdir = tlayer = None
 else:
     nid = byname[lane][0]

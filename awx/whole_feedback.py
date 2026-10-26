@@ -191,14 +191,25 @@ def put_avoid(it):
     return 1
 
 
+_KEYS = []                  # (the board beside the sidecar's nets by the whole route's names, read once: disconnected)
+
+
 def disconnected(conn_log):
     """{lane: [(x, y)]}: the balls check_connected found cut off from their net's copper"""
     import re
+    from coherent_nets import key_of
     got, cur = {}, None
     for ln in (open(conn_log, errors='replace') if conn_log and os.path.isfile(conn_log) else ()):
         m = re.match(r'^\s*(.+?) \(net \d+\):\s*$', ln)
         if m:
-            n = m.group(1).split('/')[-1]
+            if not _KEYS:
+                import contextlib
+                import io
+                from kicad_parser import parse_kicad_pcb
+                from coherent_nets import net_keys
+                with contextlib.redirect_stdout(io.StringIO()):
+                    _KEYS.append(net_keys(parse_kicad_pcb(sidecar[:-len('.plan.json')] + '.kicad_pcb')))
+            n = key_of(m.group(1), _KEYS[0])
             cur = LANE.get(n, n)
             continue
         m = re.match(r'^\s*\(([-\d.]+), ([-\d.]+)\) on \S+ \[\S+\]', ln)

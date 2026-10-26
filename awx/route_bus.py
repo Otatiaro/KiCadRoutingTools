@@ -26,10 +26,10 @@ at the chain's sizes (resolve_rules: the routing CLIs' flags, an omitted one res
 1. The bus: every net between SRC and DEST the ladder admits (make_bench.pair_nets) -- and every one a PULL or a
    TERMINATION alone keeps out (pulled_nets: its other pads on parts to a rail, or across a pair), laid as a lane,
    its stub pads off its net for the step and back on it in OUT, the stub the rest of the chain's to connect.
-   Refused: a pair through a termination part between the arrays (the whole route lays no waypoint); a net whose
-   name's last part is another net's too (name_clashes: the whole route names a net by it); and a pair leg whose
-   partner is refused or is no lane between the arrays (half_pairs: a pair is laid whole or not at all). The bus's
-   copper, if any, is stripped: the step lays both ends of every lane.
+   Refused: a pair through a termination part between the arrays (the whole route lays no waypoint); and a pair leg
+   whose partner is refused or is no lane between the arrays (half_pairs: a pair is laid whole or not at all). The
+   bus's copper, if any, is stripped: the step lays both ends of every lane. The whole route names a net by its name's
+   last path part, or in full where another net's name ends in that part too (coherent_nets.net_keys).
 2. SRC is fanned out for them (make_bench.fanout_source) -- on a plain bus by default (keeps_source_escapes), the
    escapes an earlier step's plan laid them there kept instead (escape_blocks) --, the project floor stamped, and the
    ladder written: the plan's rivers, largest first.
@@ -253,7 +253,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     import make_bench as mb
     import flow_frame as ff
     import whole_route as wr
-    from coherent_nets import coherent_nets, net_patterns, whole_pairs
+    from coherent_nets import coherent_nets, net_patterns, whole_pairs, net_keys, by_key
     from kicad_parser import parse_kicad_pcb
     from fix_kicad_drc_settings import fix_project_for_output
     import braid as te
@@ -268,6 +268,8 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     os.makedirs(work, exist_ok=True)
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(board)
+    keys = net_keys(pcb)
+    short = lambda n: keys.get(n, n)        # (a net by the whole route's name for it: its last part, else in full)
     # (DEST may name several parts, 'U4+U3': one source, several ends -- the whole route's trunk runs to the first, a
     # branch off it to each other, whole_frame)
     dests = ff.dest_refs(dest)
@@ -293,27 +295,21 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     if pulled:
         names = sorted(set(names) | set(pulled))
         log(f'  {len(pulled)} more with a PULL or a TERMINATION beside their two ends, laid as lanes, the stub left to the '
-            f'rest of the chain: ' + ', '.join(f'{n.split("/")[-1]} ({", ".join(p.component_ref for p in v)})'
+            f'rest of the chain: ' + ', '.join(f'{short(n)} ({", ".join(p.component_ref for p in v)})'
                                                for n, v in sorted(pulled.items())))
     wps = {leg: part for d in dests for leg, part in waypoint_pairs(pcb, names, src, d).items()}
     refused = {leg: f'passes through {part}, a termination part between the arrays: the whole route lays no waypoint'
                for leg, part in wps.items()}
     if wps:
-        names = [n for n in names if n.split('/')[-1] not in wps]
+        names = [n for n in names if short(n) not in wps]
         log('  refused, left to the rest of the chain with their copper as it is: '
             + ', '.join(f'{leg} (through {part})' for leg, part in sorted(wps.items()))
             + ' -- a pair that passes through a termination part between the arrays; the whole route lays no '
               'waypoint')
-    clash = name_clashes(pcb, names)
-    if clash:
-        refused.update(clash)
-        names = [n for n in names if n.split('/')[-1] not in clash]
-        log('  refused, left to the rest of the chain: '
-            + '; '.join(f'{n}: {why}' for n, why in sorted(clash.items())))
     halves = half_pairs(pcb, names)
     if halves:
         refused.update(halves)
-        names = [n for n in names if n.split('/')[-1] not in halves]
+        names = [n for n in names if short(n) not in halves]
         log('  refused, left to the rest of the chain with their pair: '
             + '; '.join(f'{leg}: {why}' for leg, why in sorted(halves.items())))
     txt = open(board, encoding='utf-8').read()
@@ -393,31 +389,31 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         joint_refs = [r_ for r_ in (awx_settings.get('ESCAPE_JOINT') or '').split(',') if r_ in (src, dest)]
         if joint_refs:
             from protected_nets import read_protected_nets, pro_path_for_board
-            prot_ = {n.split('/')[-1] for n in read_protected_nets(pro_path_for_board(board))}
+            prot_ = {short(n) for n in read_protected_nets(pro_path_for_board(board))}
             with contextlib.redirect_stdout(sys.stderr):
                 bj_ = parse_kicad_pcb(base)
-            byname_ = {n.name.split('/')[-1]: (i, n) for i, n in bj_.nets.items() if n.name}
+            byname_ = {k_: v_ for k_, v_ in by_key(bj_).items() if v_[1].name}
             zone_ = {z.net_id for z in (bj_.zones or []) if z.net_id}
-            bus_s_ = {n.split('/')[-1] for n in names}
+            bus_s_ = {short(n) for n in names}
             txt_ = open(base, encoding='utf-8').read()
             only = {}
             arrays_ = []
             for r_ in joint_refs:
                 fp_ = bj_.footprints[r_]
                 nets_ = {p_.net_id: p_.net_name for p_ in fp_.pads
-                         if p_.net_id and p_.net_name and p_.net_name.split('/')[-1] not in prot_}
+                         if p_.net_id and p_.net_name and short(p_.net_name) not in prot_}
                 xs_, ys_ = [p_.global_x for p_ in fp_.pads], [p_.global_y for p_ in fp_.pads]
                 box_ = (min(xs_) - 1.5, min(ys_) - 1.5, max(xs_) + 1.5, max(ys_) + 1.5)
-                txt_ = mb.strip_window(txt_, sorted({n.split('/')[-1] for n in nets_.values()} & set(byname_)),
+                txt_ = mb.strip_window(txt_, sorted({short(n) for n in nets_.values()} & set(byname_)),
                                        byname_, box_)
-                only[r_] = {n.split('/')[-1] for n in nets_.values()}
+                only[r_] = {short(n) for n in nets_.values()}
                 arrays_.append({'ref': r_, 'bus': list(names),
                                 'others': sorted(n for i, n in nets_.items()
-                                                 if i not in zone_ and n.split('/')[-1] not in bus_s_),
+                                                 if i not in zone_ and short(n) not in bus_s_),
                                 'drops': sorted(n for i, n in nets_.items() if i in zone_)})
                 log(f'  {r_}: joint with the bus each round -- {len(arrays_[-1]["others"])} other net(s) and the plane '
                     f'balls of {len(arrays_[-1]["drops"])} net(s) planned with it, their fanout here taken off; '
-                    f'{len(prot_ & {n.split("/")[-1] for n in (p_.net_name or "" for p_ in fp_.pads)})} routed net(s) '
+                    f'{len(prot_ & {short(n) for n in (p_.net_name or "" for p_ in fp_.pads)})} routed net(s) '
                     f'as they stand')
             with open(base, 'w', encoding='utf-8') as f_:
                 f_.write(txt_)
@@ -443,7 +439,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         if rcn != 0:
             log(f'  caps: the nudge exited {rcn} -- the passives stay where they were')
         left = {p_ for r_ in (src, dest) for p_ in dstats[r_][2]}
-        failed = sorted({short for n in names for short in [n.split('/')[-1]]
+        failed = sorted({short(n) for n in names
                          if any(f'{p.component_ref}.{p.pad_number}' in left for p in
                                 pcb.nets[next(i for i, nn in pcb.nets.items() if nn.name == n)].pads)})
         log(f'  {src} and {dest} dog-boned' + (f', no dog-bone for {failed}' if failed else ''))
@@ -521,7 +517,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
             with open(os.path.join(work, 'joint.json'), 'w', encoding='utf-8') as f:
                 json.dump(spec, f, indent=1)
             log(f'  joint fanout: the bus nets the run leaves out planned as the arrays\' others: '
-                + ', '.join(f'{r_}:{short_name(n)}' for r_, n in added))
+                + ', '.join(f'{r_}:{short(n)}' for r_, n in added))
 
     # 3. the flow frame
     with contextlib.redirect_stdout(sys.stderr):
@@ -548,7 +544,6 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                                    **({'FANOUT_ESCAPE': '1'} if escape else {}), **escape_env,
                                    **({'BUS_ATTACHED': att_s} if attached else {})})
     seq = _routed(os.path.join(work, 'run'))
-    short = lambda n: n.split('/')[-1]
     for n in names:
         if short(n) in {short(f) for f in failed}:
             refused.setdefault(short(n), 'no escape at the source fanout')
@@ -596,9 +591,9 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     # ...and so does one the whole route left OPEN (its best round short of every lane, exit 1): the step hands on what
     # it laid connected, never nothing for the sake of a few nets, and the rest of the chain routes those
     if rc != 0:
-        wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + net_patterns(nets), dict(os.environ),
+        wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + net_patterns(nets, keys), dict(os.environ),
                log_path=os.path.join(work, 'conn_open.log'), own_process=True)
-        opened = sorted(open_nets(os.path.join(work, 'conn_open.log')) & set(nets))
+        opened = sorted(open_nets(os.path.join(work, 'conn_open.log'), keys) & set(nets))
         for n in opened:
             refused.setdefault(n, 'left open by the whole route (its best round)')
         nets = [n for n in nets if n not in opened]
@@ -642,7 +637,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     zone_nets = {short(pcb.nets[z.net_id].name) for z in (pcb.zones or []) if z.net_id in pcb.nets}
     put_others = set()
     for _ in range(6):
-        pats = net_patterns(nets)
+        pats = net_patterns(nets, keys)
         cc = wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + pats, dict(os.environ),
                     log_path=os.path.join(work, 'conn.log'), own_process=True)[0]
         d_bus, d_out = drc(routed_pcb, 'bus', '--nets', *pats), drc(routed_pcb, 'board')
@@ -655,9 +650,9 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
             break
         # (another net's copper the step laid, in a violation of the bus's or one the board did not come with: back
         # first -- the bus is what the step is for. Never a plane's net, whose drops the joint field laid by the dozen)
-        named = drc_nets(os.path.join(work, 'drc_bus.log')) if d_bus else set()
+        named = drc_nets(os.path.join(work, 'drc_bus.log'), keys) if d_bus else set()
         if worse and d_out is not None:
-            named |= drc_nets(os.path.join(work, 'drc_board.log'))
+            named |= drc_nets(os.path.join(work, 'drc_board.log'), keys)
         others_ = changed_nets(board, routed_pcb, named - set(nets) - zone_nets - put_others)
         if others_:
             put_others |= others_
@@ -666,9 +661,9 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                 + (f' ({left_} piece(s) of its earlier copper left out, no longer clear)' if left_ else '')
                 + ' -- the bus graded again')
             continue
-        bad = set(nets) & (open_nets(os.path.join(work, 'conn.log'))
-                           | drc_nets(os.path.join(work, 'drc_bus.log'))
-                           | (drc_nets(os.path.join(work, 'drc_board.log'))
+        bad = set(nets) & (open_nets(os.path.join(work, 'conn.log'), keys)
+                           | drc_nets(os.path.join(work, 'drc_bus.log'), keys)
+                           | (drc_nets(os.path.join(work, 'drc_board.log'), keys)
                               if not joint_fanout and None not in (d_out, d_in) and d_out > d_in else set()))
         if not bad or bad == set(nets):
             break
@@ -753,10 +748,6 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     return finish(0, None, g, routed=nets)
 
 
-def short_name(n):
-    return n.split('/')[-1]
-
-
 def plane_grade(pcb, board, routed, log=print):
     """(more routing layers than two) the POURS the bus crossed: on each routing layer other than F.Cu and B.Cu that
     carries a pour, its nets' unconnected islands (kicad_exact_fill.exact_unconnected: the board refilled by KiCad, an
@@ -804,7 +795,7 @@ def walled_grade(board, routed, refs, names, log=print):
     from list_nets import escalation_rungs
     from protected_nets import read_protected_nets
     t0 = time.time()
-    bus = {short_name(n) for n in names}
+    bus = set(names)
     with contextlib.redirect_stdout(io.StringIO()):
         b_out = parse_kicad_pcb(routed)
     finest = escalation_rungs(len(b_out.board_info.copper_layers or ()) or 4)[-1]
@@ -815,13 +806,13 @@ def walled_grade(board, routed, refs, names, log=print):
         if foot is None:
             continue
         asked[r] = [p.pad_number for p in foot.pads
-                    if p.net_id and p.net_name and short_name(p.net_name) not in bus and p.pad_type != 'np_thru_hole'
+                    if p.net_id and p.net_name and p.net_name not in bus and p.pad_type != 'np_thru_hole'
                     and len(b_out.nets[p.net_id].pads) > 1]
 
     def fixed_nets(pcb, path):
         """the nets of `pcb` (the board at `path`) whose copper no later step moves: the bus's, the protected, a pour's"""
-        prot = {short_name(n) for n in read_protected_nets(os.path.splitext(path)[0] + '.kicad_pro')}
-        return {i for i, nn in pcb.nets.items() if short_name(nn.name) in bus | prot} | \
+        prot = set(read_protected_nets(os.path.splitext(path)[0] + '.kicad_pro'))
+        return {i for i, nn in pcb.nets.items() if nn.name in bus | prot} | \
             {z.net_id for z in (pcb.zones or []) if z.net_id}
 
     def caged_on(pcb, keys, fixed):
@@ -974,22 +965,25 @@ def array_others(pcb, ref, names):
     go, the engine laid it nothing, and the ball read bare -- the whole array planned again a rung down the fab
     ladder for it (zynq7020_som: U2's unused FPGA pins)"""
     zone_ids = {z.net_id for z in (pcb.zones or []) if z.net_id}
-    bus = {short_name(n) for n in names}
+    bus = set(names)
     return sorted({p.net_name for p in pcb.footprints[ref].pads
-                   if p.net_id and p.net_name and p.net_id not in zone_ids and short_name(p.net_name) not in bus
+                   if p.net_id and p.net_name and p.net_id not in zone_ids and p.net_name not in bus
                    and len(pcb.pads_by_net.get(p.net_id, ())) >= 2})
 
 
 def others_left_out(spec, pcb, names, run):
     """the joint fanout's `spec` ({'arrays': [{'ref', 'others', 'drops'}]}) with each bus net of `names` (full) the run
-    `run` (short names) leaves out among the others of every array it has a ball of on `pcb` -- a zone net's balls
-    are the plane drops'; [(ref, net)] added. A net the run leaves out -- its ball dropped by the source fanout, beyond
-    --k, its pair cut -- is no lane, but its balls are still the arrays': each round's joint plan escapes them with the
-    other nets', for the rest of the chain (sdi_mipi_conv's DDR3_A2, U11.L11, neither the bus's nor another net's, was
-    planned by no round, and route.py found no way out of the field the bus left it)"""
-    run_s = {short_name(n) for n in run}
+    `run` (the whole route's names, coherent_nets.net_keys) leaves out among the others of every array it has a ball
+    of on `pcb` -- a zone net's balls are the plane drops'; [(ref, net)] added. A net the run leaves out -- its ball
+    dropped by the source fanout, beyond --k, its pair cut -- is no lane, but its balls are still the arrays': each
+    round's joint plan escapes them with the other nets', for the rest of the chain (sdi_mipi_conv's DDR3_A2, U11.L11,
+    neither the bus's nor another net's, was planned by no round, and route.py found no way out of the field the bus
+    left it)"""
+    from coherent_nets import net_keys
+    keys = net_keys(pcb)
+    run_s = set(run)
     zone_ids = {z.net_id for z in (pcb.zones or []) if z.net_id}
-    left = sorted({n for n in names if short_name(n) not in run_s})
+    left = sorted({n for n in names if keys.get(n, n) not in run_s})
     added = []
     for ar in spec['arrays']:
         have = {p.net_name for p in pcb.footprints[ar['ref']].pads if p.net_id and p.net_id not in zone_ids}
@@ -1009,7 +1003,9 @@ def escapes_kept(pcb, back, left):
 
 
 def changed_nets(board, routed, names):
-    """the nets of `names` (short) whose tracks or vias on `routed` are not the ones `board` has: copper the step laid"""
+    """the nets of `names` (the whole route's names, coherent_nets.net_keys) whose tracks or vias on `routed` are not
+    the ones `board` has: copper the step laid"""
+    from coherent_nets import key_of, net_keys
     if not names:
         return set()
     src, now = open(board, encoding='utf-8').read(), open(routed, encoding='utf-8').read()
@@ -1017,7 +1013,8 @@ def changed_nets(board, routed, names):
     def items(txt):
         out = collections.defaultdict(set)
         pcb_ = parse_kicad_pcb_quiet_text(txt)
-        nm = {i: short_name(n.name) for i, n in pcb_.nets.items()}
+        keys = net_keys(pcb_)
+        nm = {i: key_of(n.name, keys) for i, n in pcb_.nets.items()}
         for s_ in pcb_.segments:
             if not getattr(s_, 'graphic', False) and nm.get(s_.net_id) in names:
                 a_, b_ = sorted([(round(s_.start_x, 3), round(s_.start_y, 3)), (round(s_.end_x, 3), round(s_.end_y, 3))])
@@ -1031,8 +1028,10 @@ def changed_nets(board, routed, names):
 
 
 def others_full(pcb, shorts):
-    """the full names of the nets `shorts` (short names)"""
-    return {n.name for n in pcb.nets.values() if n.name and short_name(n.name) in set(shorts)}
+    """the full names of the nets `shorts` (the whole route's names, coherent_nets.net_keys)"""
+    from coherent_nets import net_keys
+    keys = net_keys(pcb)
+    return {n.name for n in pcb.nets.values() if n.name and keys[n.name] in set(shorts)}
 
 
 def parse_kicad_pcb_quiet_text(txt):
@@ -1183,6 +1182,7 @@ def find_buses(pcb, min_nets=MIN_BUS_NETS):
     with step_policy():                 # (make_bench imports the chain's modules: under its policy, step_policy)
         import make_bench as mb
     from collections import Counter
+    from coherent_nets import net_keys
     many = {r for r, f in pcb.footprints.items() if len(f.pads) > 2}
     count = Counter()
     for net in pcb.nets.values():
@@ -1218,36 +1218,23 @@ def find_buses(pcb, min_nets=MIN_BUS_NETS):
                 left[net.name[1:] if net.name.startswith('/') else net.name] = '; '.join(
                     ([f'also on {", ".join(sorted(refs - {a, b}))}'] if refs - {a, b} else [])
                     + [f'{on[r]} pads on {r}' for r in (a, b) if on[r] > 1])
-        out.append(dict(src=src, dest=dest, nets=sorted(n_.split('/')[-1] for n_ in names), taken=why is None,
+        keys = net_keys(pcb)
+        out.append(dict(src=src, dest=dest, nets=sorted(keys.get(n_, n_) for n_ in names), taken=why is None,
                         why=why, left=dict(sorted(left.items()))))
     out.sort(key=lambda d: (-d['taken'], -len(d['nets']), d['src'], d['dest']))
     return out
 
 
-def name_clashes(pcb, names):
-    """{name: why} for the nets among `names` whose last path part is another net's too (the zynq's ENABLE and
-    TEST/ENABLE): the whole route names a net by that part, and the router's net patterns match it (net_queries), so
-    the other net would be fanned out, graded and laid for it"""
-    by = {}
-    for n in pcb.nets.values():
-        if n.name:
-            by.setdefault(n.name.split('/')[-1], []).append(n.name)
-    out = {}
-    for nm in names:
-        others = sorted(o for o in by.get(nm.split('/')[-1], ()) if o != nm)
-        if others:
-            out[nm.split('/')[-1]] = f'its name is also {", ".join(others)}\'s last part: the whole route names a net by it'
-    return out
-
-
 def half_pairs(pcb, names):
     """{leg: why} for the pair legs among `names` whose partner is not among them (pairs.pair_names over the board's
-    nets): a pair is laid whole or not at all, and a partner on a third part as well is no lane (the zynq's FB_CLK_N,
-    pulled to RFGND by RX22)"""
+    nets, by the whole route's names: coherent_nets.net_keys): a pair is laid whole or not at all, and a partner on a
+    third part as well is no lane (the zynq's FB_CLK_N, pulled to RFGND by RX22)"""
     import pairs as _pairs
-    short = {n.split('/')[-1] for n in names}
+    from coherent_nets import net_keys
+    keys = net_keys(pcb)
+    short = {keys.get(n, n) for n in names}
     out = {}
-    by = {n.name.split('/')[-1]: n for n in pcb.nets.values() if n.name}
+    by = {keys[n.name]: n for n in pcb.nets.values() if n.name}
     for b_, (pn, nn) in _pairs.pair_names(sorted(by), admit_all=True).items():
         if b_ in by:                         # (a base that is a net of its own is no pair: pairs.members)
             continue
@@ -1316,7 +1303,9 @@ def pulled_nets(pcb, src, dest, names):
             cand[net.net_id] = rest
 
     import pairs as _pairs
-    short = lambda i: pcb.nets[i].name.split('/')[-1]
+    from coherent_nets import net_keys
+    keys = net_keys(pcb)
+    short = lambda i: keys[pcb.nets[i].name]
 
     def stub_part(ref):
         fp_ = pcb.footprints.get(ref)
@@ -1550,8 +1539,10 @@ def waypoint_pairs(pcb, names, src, dest):
     """{leg: part} for the pairs among `names` that pass through a termination part between the arrays
     (pairs.pair_waypoints: a two-pad part with one pad on each leg, neither array, not under a ball)"""
     import pairs as _pairs
-    by = {n.name.split('/')[-1]: i for i, n in pcb.nets.items()}
-    short = [n.split('/')[-1] for n in names]
+    from coherent_nets import by_key, net_keys
+    by = {k: i for k, (i, _n) in by_key(pcb).items()}
+    keys = net_keys(pcb)
+    short = [keys.get(n, n) for n in names]
     out = {}
     for _b, (pn, nn) in _pairs.pair_names(short, admit_all=True).items():
         if pn in by and nn in by:
@@ -1560,16 +1551,17 @@ def waypoint_pairs(pcb, names, src, dest):
     return out
 
 
-def open_nets(conn_log):
-    """the nets (short names) check_connected's log finds open: unrouted, or in pieces (whole_route.open_nets)"""
+def open_nets(conn_log, keys=None):
+    """the nets check_connected's log finds open: unrouted, or in pieces (whole_route.open_nets), by the whole route's
+    names (`keys`, coherent_nets.net_keys)"""
     import whole_route as wr
-    return wr.open_nets(conn_log)
+    return wr.open_nets(conn_log, keys)
 
 
-def drc_nets(drc_log):
-    """the nets (short names) check_drc's log names in its violations: both sides of a line between two items, and
-    the net of a line naming one (the warnings after them are not read, nor the rows of the board's length rules,
-    whole_route.LENGTH_ROWS, which the grade does not count)"""
+def drc_nets(drc_log, keys=None):
+    """the nets check_drc's log names in its violations, by the whole route's names (`keys`, coherent_nets.net_keys):
+    both sides of a line between two items, and the net of a line naming one (the warnings after them are not read,
+    nor the rows of the board's length rules, whole_route.LENGTH_ROWS, which the grade does not count)"""
     import whole_route as wr
     from fanout_from_plan import drc_side_net
     out, found, kind = set(), False, None
@@ -1583,7 +1575,7 @@ def drc_nets(drc_log):
         if not found or not ln.startswith('  ') or ln.startswith('   ') or kind in wr.LENGTH_ROWS:
             continue
         for side in ln.rstrip('\n').split(' <-> '):
-            nm = drc_side_net(re.sub(r':\s*dist=.*$', '', side))
+            nm = drc_side_net(re.sub(r':\s*dist=.*$', '', side), keys)
             if nm:
                 out.add(nm)
     return out

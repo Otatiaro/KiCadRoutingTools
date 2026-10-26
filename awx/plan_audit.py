@@ -584,7 +584,7 @@ def check_dives(ctx, corridors, show_all=False):
     cell_n = _pairs.pose_via_cells(cfg, _pairs.pitch(TW) / 2)
     r_line = VR + TW / 2 + CL + _pairs.pitch(TW) / 2
     r_via = 2 * VR + CL
-    name = lambda i: (ctx.pcb.nets[i].name.split('/')[-1] if i in ctx.pcb.nets else str(i))
+    name = lambda i: (ctx.net_key(ctx.pcb.nets[i].name) if i in ctx.pcb.nets else str(i))
     pads = [(fp.reference, pd) for fp in ctx.pcb.footprints.values() for pd in fp.pads
             if pd.pad_type != 'np_thru_hole' and any(L.endswith('.Cu') for L in pd.layers)]
     # an unplated hole has no copper, but a via's drill keeps the hole-to-hole rule from it, as the router keeps it
@@ -884,7 +884,7 @@ def check_static(ctx, corridors, only=None):
                 Ls = {L for L in pd.layers if L in ctx.cfg.layers}
                 if Ls:
                     pads.append((fp.reference, pd, Ls, 'pad'))
-    name = lambda i: (ctx.pcb.nets[i].name.split('/')[-1] if i in ctx.pcb.nets else str(i))
+    name = lambda i: (ctx.net_key(ctx.pcb.nets[i].name) if i in ctx.pcb.nets else str(i))
     kos = keepout_areas(ctx.pcb, ctx.cfg.layers)
     hits, near_ = {}, set()
     for c in corridors:

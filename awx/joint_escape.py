@@ -48,6 +48,7 @@ import time
 import types
 
 import awx_settings
+from coherent_nets import namer, engine_filter      # (a net by the whole route's name: its last part, else in full)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -118,10 +119,6 @@ HOLD_TOL = 0.05            # mm: (`hold`) an escape's exit this close to the hel
 C_STUB = 4000
 
 
-def short_name(n):
-    return n.split('/')[-1]
-
-
 def signal_layers(pcb):
     """every copper layer but an INNER one carrying a pour (a plane layer); an outer layer always"""
     planes = {z.layer for z in (pcb.zones or []) if z.net_id and z.layer not in OUTER}
@@ -153,10 +150,11 @@ def preferred_teeth(board, ref, bus):
     import source_realize as sr
     with contextlib.redirect_stdout(io.StringIO()):
         pcb = parse_kicad_pcb(board)
-    byname = {short_name(n.name): (i, n) for i, n in pcb.nets.items()}
+    sn = namer(pcb)
+    byname = {sn(n.name): (i, n) for i, n in pcb.nets.items()}
     out = {}
     for n in bus:
-        nm = short_name(n)
+        nm = sn(n)
         if nm not in byname:
             continue
         pad = next((q for q in byname[nm][1].pads if q.component_ref == ref), None)
@@ -355,7 +353,8 @@ def lane_rays(pcb, grid, foot, nets, reach=LANE_REACH):
     face that end lies beyond, `reach` mm. Only the stub stands at the fanout; the lane goes on from its end"""
     x0, y0, x1, y1 = grid.bbox
     grow = 1.5
-    ids = {p.net_id for p in foot.pads if p.net_id and short_name(p.net_name or '') in nets}
+    sn = namer(pcb)
+    ids = {p.net_id for p in foot.pads if p.net_id and sn(p.net_name or '') in nets}
     ends = {}
     for s in pcb.segments:
         if s.net_id not in ids:
@@ -469,7 +468,8 @@ def laid_pockets(pcb, grid, nets):
     legs = {leg for pr in prs.values() for leg in pr}
     if not legs:
         return []
-    name_of = {i: short_name(n.name) for i, n in pcb.nets.items() if n.name}
+    sn = namer(pcb)
+    name_of = {i: sn(n.name) for i, n in pcb.nets.items() if n.name}
     segs = [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer, s.net_id) for s in pcb.segments
             if name_of.get(s.net_id) in legs]
     tooth = pt.teeth(segs, name_of, legs, grid.bbox)
@@ -486,7 +486,8 @@ def lane_walls(pcb, grid, nets):
     import braid as te
     import pair_teeth as pt
     import pairs as _pairs
-    name_of = {i: short_name(n.name) for i, n in pcb.nets.items() if n.name}
+    sn = namer(pcb)
+    name_of = {i: sn(n.name) for i, n in pcb.nets.items() if n.name}
     laid = set(nets)
     segs = [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer, s.net_id) for s in pcb.segments
             if name_of.get(s.net_id) in laid]
@@ -596,14 +597,15 @@ def reserve_ball_vias(pcb, spec=None):
     from list_nets import escalation_rungs
     from bga_fanout.geometry import clamp_via_to_pad
     floors = escalation_rungs(len(pcb.board_info.copper_layers or ()) or 4)
+    sn = namer(pcb)
     n = 0
     for a in spec.get('arrays', ()):
         foot = pcb.footprints.get(a['ref'])
         if foot is None:
             continue
-        want = {short_name(x) for x in a.get('others', ())}
+        want = {sn(x) for x in a.get('others', ())}
         for p in foot.pads:
-            if not p.net_id or short_name(p.net_name or '') not in want:
+            if not p.net_id or sn(p.net_name or '') not in want:
                 continue
             size, drill = clamp_via_to_pad(te.VIA_SIZE, te.VIA_DRILL, p, floors)[:2]
             pcb.vias.append(Via(x=p.global_x, y=p.global_y, size=size, drill=drill or te.VIA_DRILL,
@@ -665,14 +667,15 @@ def tied_passives(pcb, refs, nets):
     # (a signal's: a plane net's passive -- a decoupling cap's pad under a power ball -- has its own way down, and
     # moving it off the copper is the cap step's whole work)
     planes = {z.net_id for z in (pcb.zones or []) if z.net_id}
-    want = {short_name(n) for n in nets}
+    sn = namer(pcb)
+    want = {sn(n) for n in nets}
     out = set()
     for r in refs:
         fp = pcb.footprints.get(r)
         if fp is None:
             continue
         for q in fp.pads:
-            if q.net_id and q.net_id not in planes and short_name(q.net_name or '') in want and \
+            if q.net_id and q.net_id not in planes and sn(q.net_name or '') in want and \
                     any(p.component_ref != r and _pairs.under_pad(p, q, te.VIA_SIZE)
                         for p in pcb.pads_by_net.get(q.net_id, ())):
                 out.add(r)
@@ -781,13 +784,14 @@ def bus_groups(pcb, ref, bus):
         ends = {p.component_ref for p in net.pads if p.component_ref in many}
         if len(ends) == 2 and ref in ends:
             count[min(ends - {ref})] += 1
-    bus_s = {short_name(n) for n in bus}
+    sn = namer(pcb)
+    bus_s = {sn(n) for n in bus}
     out = {}
     for other, n in sorted(count.items(), key=lambda t: (-t[1], t[0])):
         if n < MIN_BUS_NETS:
             continue
         with contextlib.redirect_stdout(io.StringIO()):
-            nets = {short_name(x) for x in mb.pair_nets(pcb, ref, other)}
+            nets = {sn(x) for x in mb.pair_nets(pcb, ref, other)}
         if len(nets) < MIN_BUS_NETS or nets & bus_s:
             continue                        # (too few the whole route admits; or the bus itself)
         for x in sorted(nets):
@@ -798,12 +802,12 @@ def bus_groups(pcb, ref, bus):
     return out
 
 
-def array_pairs(foot, nets):
-    """{base: (P leg, N leg)}: the differential pairs among `nets` (short names) with a ball on the array `foot` --
-    pairs.pair_names over its pads' nets, every suffix pair admitted; a base that is a net of its own is no pair
-    (pairs.members)"""
+def array_pairs(foot, nets, sn):
+    """{base: (P leg, N leg)}: the differential pairs among `nets` (the whole route's names, `sn`: coherent_nets.namer)
+    with a ball on the array `foot` -- pairs.pair_names over its pads' nets, every suffix pair admitted; a base that is
+    a net of its own is no pair (pairs.members)"""
     import pairs as _pairs
-    here = sorted({short_name(p.net_name or '') for p in foot.pads if p.net_id} & set(nets))
+    here = sorted({sn(p.net_name or '') for p in foot.pads if p.net_id} & set(nets))
     return {b_: v_ for b_, v_ in _pairs.pair_names(here, admit_all=True).items() if b_ not in here}
 
 
@@ -821,9 +825,10 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
     grid = em.grid_of(foot)
     if climb is None:
         climb = max(len(grid.xs), len(grid.ys))
-    bus_s = {short_name(n) for n in bus}
-    oth_s = {short_name(n) for n in others}
-    drop_s = {short_name(n) for n in drops} - bus_s - oth_s
+    sn = namer(pcb)
+    bus_s = {sn(n) for n in bus}
+    oth_s = {sn(n) for n in others}
+    drop_s = {sn(n) for n in drops} - bus_s - oth_s
     sz = _sizes(pcb, foot)
     skip = movable_refs(pcb, ref, bus)
     cache = {}
@@ -852,11 +857,11 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
     bus_layers = bus_route_layers(pcb)
     rls = run_layers()
     planes = set(plane_layers(pcb))
-    pairs_ = array_pairs(foot, bus_s | oth_s)
+    pairs_ = array_pairs(foot, bus_s | oth_s, sn)
     partner = {leg: (pn if leg == nn else nn) for _b, (pn, nn) in pairs_.items() for leg in (pn, nn)}
-    nid_of = {short_name(n.name): i for i, n in pcb.nets.items() if n.name}
+    nid_of = {sn(n.name): i for i, n in pcb.nets.items() if n.name}
     # (the lanes laid already -- the array's nets this plan does not place, the bus's -- held clear of the drops)
-    rays = lane_rays(pcb, grid, foot, {short_name(p.net_name) for p in foot.pads if p.net_id and p.net_name}
+    rays = lane_rays(pcb, grid, foot, {sn(p.net_name) for p in foot.pads if p.net_id and p.net_name}
                      - bus_s - oth_s - drop_s) if drop_s else []
     regions = zone_regions(pcb) if drop_s else None
     unheld = []
@@ -880,7 +885,7 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
                 return ((p.global_x, p.global_y)[ax] - mid_[ax]) * ep.DIRS[d][ax] >= -1e-6
             return [d for d in ep.DIRS if (d != far_ or far_ok) and (d == toward_ or half(d))]
     for p in foot.pads:
-        nm = short_name(p.net_name or '')
+        nm = sn(p.net_name or '')
         if not p.net_id or (nm not in bus_s and nm not in oth_s and nm not in drop_s):
             continue
         key = f'{nm}#{p.pad_number}'
@@ -924,7 +929,7 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
                     lambda q, L, _n=p.net_id, _p=p, _c=centre: _via_clear(
                         pcb, obs, _n, q, sz['inpad'](_p)[0] if q == _c else sz['vr'], sz),
                     climb=climb if nm in bus_s else min(climb, CLIMB_OTHER), own_line=True, straight=True,
-                    street=street, street_pitch=sz['stack'] + 1e-4)
+                    street=street, street_pitch=sz['stack'] + 1e-4, net=nm)
         if runs:
             # each run's layers: those its every stretch on RUN is clear on (enumerate_moves asked any one of them)
             kept = []
@@ -993,7 +998,7 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
     # is walled in once it closes -- the zynq DDR's U1 NetR3_2 escaped on B.Cu between DDR3_DQS1's B teeth, 0.77 mm
     # apart, A14 over its end -- and a drop's via there stands in the pair's way -- U2's GND B9 dropped between
     # DDR3_DQS1's berths, the whole route's audit found the pair 0.03 mm into it)
-    laid_s = {short_name(p.net_name) for p in foot.pads if p.net_id and p.net_name} - bus_s - oth_s - drop_s
+    laid_s = {sn(p.net_name) for p in foot.pads if p.net_id and p.net_name} - bus_s - oth_s - drop_s
     pockets = laid_pockets(pcb, grid, laid_s)
     if pockets:
         for key in menu:
@@ -2123,14 +2128,14 @@ def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane
     spec = {'net_layers': {**{n: bus_route_layers(pcb) for n in bus}, **{n: list(other_layers) for n in others}},
             'priority': list(bus)}
     tracks, vias_add, vias_rm, failed = generate_bga_fanout(
-        pcb.footprints[ref], pcb, net_filter=list(bus) + list(others),
+        pcb.footprints[ref], pcb, net_filter=engine_filter(list(bus) + list(others), pcb),
         layers=list(pcb.board_info.copper_layers), track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR,
         via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method='jointescape',
         plane_drop=plane_drop, escape_dir_hints=hints, bus=spec, **extra)
     tracks, vias_add, gated = keep_pair_gates(pcb, ref, hints, tracks, vias_add)
     if gated:
         print(f'  joint escape of {ref}: left out, an escape through a planned pair\'s gate: '
-              + ', '.join(sorted(pcb.nets[i].name.split('/')[-1] for i in gated)))
+              + ', '.join(sorted(namer(pcb)(pcb.nets[i].name) for i in gated)))
     if tracks or vias_add:
         add_tracks_and_vias_to_pcb(board, out, tracks, vias_add, vias_rm,
                                    net_id_to_name={i: n.name for i, n in pcb.nets.items()})
@@ -2161,8 +2166,9 @@ def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, pas
     foot = pcb0.footprints[ref]
     xs, ys = [p.global_x for p in foot.pads], [p.global_y for p in foot.pads]
     box = (min(xs) - 1.5, min(ys) - 1.5, max(xs) + 1.5, max(ys) + 1.5)
-    byname = {short_name(n.name): (i, n) for i, n in pcb0.nets.items() if n.name}
-    nets = sorted({short_name(n) for n in list(bus) + list(others) + list(drops)} & set(byname))
+    sn = namer(pcb0)
+    byname = {sn(n.name): (i, n) for i, n in pcb0.nets.items() if n.name}
+    nets = sorted({sn(n) for n in list(bus) + list(others) + list(drops)} & set(byname))
     stem = out[:-len('.kicad_pcb')] if out.endswith('.kicad_pcb') else out
     bare = f'{stem}.bare.kicad_pcb'
     with open(bare, 'w', encoding='utf-8') as f:
@@ -2176,17 +2182,17 @@ def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, pas
         hints, rep = plan_array(pcb, ref, list(bus), list(others), layers, far=far_face(pcb, ref, dest), drops=drops,
                                 prefer=prefer, log=log, debug=True, escape_to=dest, hold=hold)
         chosen = (rep.pop('debug', None) or {}).get('chosen') or {}
-        bus_s = {short_name(n) for n in bus}
+        bus_s = {sn(n) for n in bus}
         # (a bus ball the plan escaped with no tooth held -- its lane the step's ends gave none: its escape as the
         # plan chose it, the tooth the step may hold it to on this field, `bus_free`)
-        held_s = {short_name(n) for n in hold}
+        held_s = {sn(n) for n in hold}
         rep['bus_free'] = {k.split('#')[0]: {'tooth': tuple(o.exit_pt), 'direction': o.direction, 'layer': o.layer,
                                              'kind': o.kind}
                            for k, (kind, o) in sorted(chosen.items())
                            if kind == 'escape' and k.split('#')[0] in bus_s and k.split('#')[0] not in held_s}
         sz = _sizes(pcb, pcb.footprints[ref])
         r = _rules.active()
-        pads = {f'{short_name(p.net_name)}#{p.pad_number}': p for p in pcb.footprints[ref].pads if p.net_id}
+        pads = {f'{sn(p.net_name)}#{p.pad_number}': p for p in pcb.footprints[ref].pads if p.net_id}
         tracks, vias = [], []
         for k, (kind, o) in sorted(chosen.items()):
             if k.split('#')[0] not in bus_s or kind != 'escape' or o.site is None:
@@ -2264,12 +2270,13 @@ def bare_balls(board, ref, nets, track_width):
     from bga_fanout import ball_has_copper
     with contextlib.redirect_stdout(io.StringIO()):
         pcb = parse_kicad_pcb(board)
-    want = {short_name(n) for n in nets}
+    sn = namer(pcb)
+    want = {sn(n) for n in nets}
     vias = [{'x': v.x, 'y': v.y, 'size': v.size, 'net_id': v.net_id} for v in pcb.vias]
     tracks = [{'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y), 'layer': s.layer, 'net_id': s.net_id}
               for s in pcb.segments]
-    return [f'{short_name(p.net_name)}#{p.pad_number}' for p in pcb.footprints[ref].pads
-            if p.net_id and short_name(p.net_name or '') in want and not ball_has_copper(p, vias, tracks, track_width)]
+    return [f'{sn(p.net_name)}#{p.pad_number}' for p in pcb.footprints[ref].pads
+            if p.net_id and sn(p.net_name or '') in want and not ball_has_copper(p, vias, tracks, track_width)]
 
 
 def carry(prev, cur, out, ref, others, drops, grow=1.5, release_near=(), in_place=False):
@@ -2291,9 +2298,10 @@ def carry(prev, cur, out, ref, others, drops, grow=1.5, release_near=(), in_plac
     from kicad_writer import add_tracks_and_vias_to_pcb
     with contextlib.redirect_stdout(io.StringIO()):
         old, now = parse_kicad_pcb(prev), parse_kicad_pcb(cur)
-    want = {short_name(n) for n in list(others) + list(drops)}
-    name_of = {i: short_name(n.name) for i, n in old.nets.items()}
-    id_now = {short_name(n.name): i for i, n in now.nets.items()}
+    sn, sn_now = namer(old), namer(now)
+    want = {sn(n) for n in list(others) + list(drops)}
+    name_of = {i: sn(n.name) for i, n in old.nets.items()}
+    id_now = {sn_now(n.name): i for i, n in now.nets.items()}
     foot = old.footprints[ref]
     xs, ys = [p.global_x for p in foot.pads], [p.global_y for p in foot.pads]
     box = (min(xs) - grow, min(ys) - grow, max(xs) + grow, max(ys) + grow)
@@ -2398,8 +2406,9 @@ def undropped_balls(board, ref, drops, track_width):
     from kicad_parser import parse_kicad_pcb
     with contextlib.redirect_stdout(io.StringIO()):
         pcb = parse_kicad_pcb(board)
-    poured = {(short_name(z.net_name or ''), z.layer) for z in (pcb.zones or []) if z.net_id}
-    layers_of = {f'{short_name(p.net_name or "")}#{p.pad_number}': set(p.layers) for p in pcb.footprints[ref].pads}
+    sn = namer(pcb)
+    poured = {(sn(z.net_name or ''), z.layer) for z in (pcb.zones or []) if z.net_id}
+    layers_of = {f'{sn(p.net_name or "")}#{p.pad_number}': set(p.layers) for p in pcb.footprints[ref].pads}
     planeless = set(planeless_balls(pcb, ref, drops))
     return [k for k in bare_balls(board, ref, drops, track_width)
             if not any((k.split('#')[0], L) in poured for L in layers_of.get(k, ())) and k not in planeless]
@@ -2415,10 +2424,11 @@ def planeless_balls(pcb, ref, drops):
     g = em.grid_of(foot)
     hx, hy = g.pitch_x / 2.0, g.pitch_y / 2.0
     regions = zone_regions(pcb)
-    drop_s = {short_name(n) for n in drops}
+    sn = namer(pcb)
+    drop_s = {sn(n) for n in drops}
     out = []
     for p in foot.pads:
-        nm = short_name(p.net_name or '')
+        nm = sn(p.net_name or '')
         if not p.net_id or nm not in drop_s:
             continue
         q = (p.global_x, p.global_y)

@@ -74,6 +74,8 @@ def dogbone(pcb, refs, log=print, only=None):
     stand): there a ball already carrying its own net's copper is left as it is, a plane ball keeps a via (its drop),
     and the board's TRACKS keep their clearance too (a site off every track on every layer, a stub off the tracks on
     its own); the other arrays as with no `only`"""
+    from coherent_nets import namer
+    sn = namer(pcb)                 # (a net by the whole route's name for it: `only`'s names, a pair's legs)
     r = _rules.active()
     VIA, DRILL, STUB, CLEAR = r.via_size, r.via_drill, r.fan_track, r.fan_clear
     H2H = getattr(r, 'hole_to_hole', None) or 0.25
@@ -165,7 +167,7 @@ def dogbone(pcb, refs, log=print, only=None):
                     any(v.net_id == p.net_id and math.hypot(v.x - p.global_x, v.y - p.global_y) <= rr
                         for v in pcb.vias)
             want = only[ref]
-            scoped = [p for p in pads if (p.net_name or '').split('/')[-1] in want]
+            scoped = [p for p in pads if sn(p.net_name or '') in want]
             held = sum(1 for p in scoped if carries(p))
             pads_all = pads
             pads = [p for p in scoped if not carries(p)]
@@ -213,7 +215,7 @@ def dogbone(pcb, refs, log=print, only=None):
             # escape on the surface and one through a via, no two of which make a pair's option (zynq LVDS U5 RX_D0:
             # every berth option refused) -- the leg is dog-boned with its partner
             import pairs as _pairs
-            short_ = lambda p: (getattr(p, 'net_name', '') or '').split('/')[-1]
+            short_ = lambda p: sn(getattr(p, 'net_name', '') or '')
             ball_of = {}
             for p in pads:
                 ball_of.setdefault(short_(p), []).append(p)

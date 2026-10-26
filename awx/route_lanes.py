@@ -138,7 +138,7 @@ def probe_at(ctx, cl, x, y, R=0.35):
             f, b = not obs.is_blocked(gx, gy, 0), not obs.is_blocked(gx, gy, 1)
             row += 'V' if v and f and b else 'b' if f and b else 'F' if f else 'B' if b else '.'
         print('      ' + row)
-    name = lambda i: (ctx.pcb.nets[i].name.split('/')[-1] if i in ctx.pcb.nets else str(i))
+    name = lambda i: (ctx.net_key(ctx.pcb.nets[i].name) if i in ctx.pcb.nets else str(i))
     win, kw, nid = cl.get('win'), cl['kw'], cl.get('nid')
     near = [(dseg(x, y, p, q) - cfg.track_width / 2, 'reserved', L[0]) for (p, q, L) in (kw.get('virtual') or [])]
     near += [(math.hypot(x - vx, y - vy) - cfg.via_size / 2, 'reserved via', '*')

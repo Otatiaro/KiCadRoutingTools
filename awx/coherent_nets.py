@@ -15,16 +15,58 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BENCH = os.path.join(HERE, 'fb_t2q_fresh.kicad_pcb')
 
 
-def net_patterns(names):
+def net_keys(src):
+    """{net name: the whole route's name for the net} for every named net of `src` (a board, or its by_key map): the
+    name's last path part -- the sheet path off, as a ladder, a plan and a log name a bus's nets -- where no other net's
+    name ends in that part, else the name whole (ENABLE and TEST/ENABLE: each by its full name, or the one is fanned
+    out, graded and laid for the other)"""
+    if not hasattr(src, 'nets'):
+        return {n.name: k for k, (_i, n) in src.items() if n.name}
+    from net_queries import short_net_names
+    return short_net_names(src)
+
+
+def key_of(name, keys=None):
+    """A net's name, as a checker's log or a pad gives it, by the whole route's name for it: `keys` (net_keys) when
+    given, else -- or for a name not among them -- its last path part"""
+    return keys[name] if keys and name in keys else name.split('/')[-1]
+
+
+def namer(src):
+    """key_of over the nets of `src` -- a board, or its by_key map -- as a function: a net name, full or already the
+    whole route's, by the whole route's name for it"""
+    keys = net_keys(src)
+    return lambda name: key_of(name, keys)
+
+
+def by_key(pcb):
+    """{the whole route's name (net_keys): (net id, net)} for every net of `pcb` (the unnamed by '')"""
+    keys = net_keys(pcb)
+    return {keys.get(n.name, n.name): (i, n) for i, n in pcb.nets.items()}
+
+
+def net_patterns(names, keys=None):
     """The checkers' --nets patterns (fnmatchcase) for the nets `names`: each net as named and under any sheet path
     (NAME, */NAME) -- not *NAME, which takes every net whose name merely ENDS so (a bus net CK took SCK and ADC_CK: an
-    open one failed the bus's connectivity, its violations counted as the bus's). A glob character in a name is
-    bracketed, so it matches only itself (DATA[0])."""
+    open one failed the bus's connectivity, its violations counted as the bus's) -- and a net the board names by its
+    full name (`keys`, net_keys) as named only. A glob character in a name is bracketed, so it matches only itself
+    (DATA[0])."""
+    whole = {k for n, k in (keys or {}).items() if k == n}
     out = []
     for n in names:
         q = re.sub(r'([*?\[])', r'[\1]', n)
-        out += [q, '*/' + q]
+        out += [q] if '/' in n or n in whole else [q, '*/' + q]
     return out
+
+
+def engine_filter(names, pcb):
+    """The fanout engine's net_filter for the nets `names` (full names or the whole route's, net_keys) on `pcb`: each
+    net by its full name, a glob character in it bracketed -- the engine takes a name that is a net's own as that net
+    alone (net_queries.named_net)"""
+    from net_queries import literal_net_pattern
+    keys = net_keys(pcb)
+    full = {k: n for n, k in keys.items()}
+    return [literal_net_pattern(n if n in keys else full.get(n, n)) for n in names]
 
 
 def ladder_of(board=BENCH):
@@ -60,8 +102,8 @@ def admissible(pcb, net):
     # (a pull pad the bus step's escape fanout joined to the lane -- BUS_ATTACHED, route_bus.attach_pulls -- is none
     # of the net's ends: its stub stands on the board, connected when the lane is)
     attached = {h for h in (awx_settings.get('BUS_ATTACHED') or '').split(',') if h}
-    bn_all = {n.name.split('/')[-1] for n in pcb.nets.values()}
-    prs = _pairs.pair_names(list(bn_all), admit_all=True)   # admission ignores BRAID_PAIR_ONLY
+    keys = net_keys(pcb)
+    prs = _pairs.pair_names(list(set(keys.values())), admit_all=True)   # admission ignores BRAID_PAIR_ONLY
     partner = {}
     for _b, (_pn, _nn) in prs.items():
         partner[_pn], partner[_nn] = _nn, _pn
@@ -70,15 +112,14 @@ def admissible(pcb, net):
         return False
     if len(pads) == 2:
         return True
-    short = net.name.split('/')[-1]
-    mate = partner.get(short)
+    mate = partner.get(keys.get(net.name, net.name))
 
     def waypoint(p):
         fp = pcb.footprints.get(p.component_ref)
         if fp is None or mate is None or len(fp.pads) != 2:
             return False
         other = [q for q in fp.pads if q is not p][0]
-        return pcb.nets[other.net_id].name.split('/')[-1] == mate if other.net_id in pcb.nets else False
+        return keys.get(pcb.nets[other.net_id].name) == mate if other.net_id in pcb.nets else False
     via_size = _rules.active().via_size
     ends = [p for p in pads if not waypoint(p)
             and not any(_pairs.under_pad(q, p, via_size) for q in pads if q is not p)]
@@ -106,10 +147,10 @@ def coherent_nets(K, board=BENCH, bare_ok=None):
     # captures, so those go to stderr here
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(board)
-    by = {n.name.split('/')[-1]: n for n in pcb.nets.values()}
+    bn = by_key(pcb)
+    by = {k: n for k, (_i, n) in bn.items()}
     two_ended = lambda net: admissible(pcb, net)
     flat = [n for n in flat if n in by and two_ended(by[n])]
-    bn = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
     ok = []
     for n in flat:
         try:

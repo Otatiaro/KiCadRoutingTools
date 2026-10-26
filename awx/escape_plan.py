@@ -83,7 +83,9 @@ class Copper:
     CELL = 1.0
 
     def __init__(self, pcb, track, clear):
+        from coherent_nets import namer
         self.track, self.clear = track, clear
+        self.net_key = namer(pcb)           # (a net by the whole route's name for it: an escape's Move is named so)
         self.bins = collections.defaultdict(list)
         cell = lambda x: int(math.floor(x / self.CELL))
         for fp in pcb.footprints.values():
@@ -180,7 +182,7 @@ def own_via(pcb, pad, nid, grid):
 def escape_menu(pad, site, grid, faces, layers, copper, side=SIDE):
     """every escape the ball at `pad` has from its via at `site`, by each of `faces`, on each of `layers` (the module's
     docstring): [Move]"""
-    net = (getattr(pad, 'net_name', '') or '').split('/')[-1]
+    net = copper.net_key(getattr(pad, 'net_name', '') or '')
     nid = pad.net_id
     home = next((L for L in pad.layers if L.endswith('.Cu')), 'F.Cu')
     x0, y0, x1, y1 = grid.bbox
@@ -242,7 +244,7 @@ def escape_out(pad, grid, faces, copper):
     own layer, straight along its own line or half a step onto a gap line beside it, to the exit (escape_menu's line, a
     pitch past the outer balls) -- a SURFACE escape, its run on that layer; where the lane leaves that layer is the
     route's, as the human's surface escapes dive 0.8-2.9 mm off the balls in pairs (zynq U1)"""
-    net = (getattr(pad, 'net_name', '') or '').split('/')[-1]
+    net = copper.net_key(getattr(pad, 'net_name', '') or '')
     nid = pad.net_id
     home = next((L for L in pad.layers if L.endswith('.Cu')), 'F.Cu')
     x0, y0, x1, y1 = grid.bbox
@@ -294,7 +296,8 @@ def plan_state(pcb, names, sref, dref, banned=frozenset(), log=print, hold_teeth
     r = _rules.active()
     track, clear = r.fan_track, r.fan_clear
     copper = Copper(pcb, track, clear)
-    byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+    from coherent_nets import by_key
+    byname = by_key(pcb)
     rlayers = list(route_layers.layers())
     sfp, dfp = pcb.footprints[sref], pcb.footprints[dref]
     sgrid, dgrid = em.grid_of(sfp), em.grid_of(dfp)
@@ -587,7 +590,8 @@ def run(out_path, K, base, log=print):
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(base)
     dref = awx_settings.get('DEST') or 'U5'
-    byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+    from coherent_nets import by_key, namer
+    byname = by_key(pcb)
     refs = collections.Counter(p.component_ref for nm in names if nm in byname for p in byname[nm][1].pads
                                if p.component_ref != dref)
     sref = refs.most_common(1)[0][0]
@@ -650,7 +654,7 @@ def run(out_path, K, base, log=print):
             import relayer as _relayer
             with contextlib.redirect_stdout(sys.stderr):
                 pcb_e = parse_kicad_pcb(st_['base'])
-            ids_e = {n.name.split('/')[-1]: i for i, n in pcb_e.nets.items() if n.name}
+            ids_e = {k_: i for k_, (i, n) in by_key(pcb_e).items() if n.name}
             fw_ = _rules.active().fan_track
             runs_ = {}
             for nm, m in teeth_.items():
@@ -670,7 +674,8 @@ def run(out_path, K, base, log=print):
                 f'array\'s other copper')
         field_ = out_path[:-len('.kicad_pcb')] + '.field.kicad_pcb'
         run_s = set(names)
-        others_ = list(arr_['others']) + [n for n in arr_.get('bus', ()) if n.split('/')[-1] not in run_s]
+        sn_ = namer(pcb)
+        others_ = list(arr_['others']) + [n for n in arr_.get('bus', ()) if sn_(n) not in run_s]
         # (the passives movable to the plan, as the engine lays it -- planned as fixed, the engine refused 23 of zynq
         # U1's planned drops the plan held clear; they are nudged off the round's copper once it is laid, below)
         rep_ = je.escape_field(board_ or base0, field_, sref, dref, list(names), others_, arr_['drops'], hold_, log=log,

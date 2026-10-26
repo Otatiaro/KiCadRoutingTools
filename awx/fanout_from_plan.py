@@ -44,7 +44,7 @@ import escape_moves as em  # noqa: E402
 import detect_buses as db  # noqa: E402
 import plan_ends as pe  # noqa: E402
 import source_realize as sr  # noqa: E402
-from coherent_nets import coherent_nets, net_patterns  # noqa: E402
+from coherent_nets import coherent_nets, net_patterns, net_keys, engine_filter  # noqa: E402
 import rules as _rules  # noqa: E402  ONE source for every design rule
 import route_layers  # noqa: E402  the routing layers: the escapes' runs may take any of them
 
@@ -242,7 +242,8 @@ def plan_state(pcb, names, banned=frozenset()):
     # the joint fanout (FANOUT_JOINT): the arrays' other balls keep their own via sites, which the menus leave free
     import joint_escape as _je
     _je.reserve_ball_vias(pcb)
-    byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+    from coherent_nets import by_key
+    byname = by_key(pcb)
     ends = te.endpoints(pcb, names, byname)
     kids = {byname[n][0] for n in names}
     # a pair's exit room is checked against copper OUTSIDE the run under the ends model, whose search moves the run's
@@ -267,6 +268,8 @@ def plan_state(pcb, names, banned=frozenset()):
     # moved there stands in it)
     via_layers = (list(pcb.board_info.copper_layers or ()) if len(route_layers.layers()) > 2 else None)
 
+    key_of_id = {i: k for k, (i, _n) in byname.items()}
+
     def menu(pad, grid, nid, own_only=False, climb=0, street=0, street_dirs=None):
         # (ends) the straight escape along the ball's own line too (escape_moves `straight`)
         return em.enumerate_moves(
@@ -275,7 +278,7 @@ def plan_state(pcb, names, banned=frozenset()):
             lambda p, L, _n=nid: not any((obs(_n, L_, own_only).point_violation(
                 p, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0] for L_ in (via_layers or (L,))),
             climb=climb, straight=(PLAN_JUDGE == 'ends'),
-            street=street, street_pitch=pe.sm._STACK_PITCH + 1e-4, street_dirs=street_dirs)
+            street=street, street_pitch=pe.sm._STACK_PITCH + 1e-4, street_dirs=street_dirs, net=key_of_id.get(nid))
     dmenu, launch, src_pad, dst_pad = {}, {}, {}, {}
     dref = ends[names[0]][2]
     # (DEST naming several parts, one source and several ends: the trunk's -- the first -- is the plan's destination
@@ -583,11 +586,12 @@ def pair_travel(da, db):
 
 
 def teeth_hands(pcb, names, byname, sref):
-    """{a pair's P leg (short name): (hand, True)}: the HAND each pair's teeth leave the array `sref` with on `pcb`
-    (pairs.hand, the teeth as they stand -- the destination not yet fanned, each net's one free end is its tooth),
-    the hand its berths are to ARRIVE with: a coupled route keeps P on one side of its travel from end to end"""
-    import joint_escape as je
+    """{a pair's P leg (the whole route's name): (hand, True)}: the HAND each pair's teeth leave the array `sref` with
+    on `pcb` (pairs.hand, the teeth as they stand -- the destination not yet fanned, each net's one free end is its
+    tooth), the hand its berths are to ARRIVE with: a coupled route keeps P on one side of its travel from end to end"""
     import pairs as _pairs
+    from coherent_nets import namer
+    sn = namer(byname)
     out = {}
     for _b, (pn, nn) in _pairs.pair_names(list(names)).items():
         g = {}
@@ -600,14 +604,13 @@ def teeth_hands(pcb, names, byname, sref):
             continue                # (a leg with no tooth -- bare: the other end's hand is the pair's)
         h = _pairs.hand(pair_travel(g[pn]['direction'], g[nn]['direction']), g[pn]['tooth'], g[nn]['tooth'])
         if h:
-            out[je.short_name(pn)] = (h, True)
+            out[sn(pn)] = (h, True)
     return out
 
 
 def berth_hands(choice):
-    """{a pair's P leg (short name): (hand, False)}: the hand each pair's berths in `choice` {net: Move} arrive with
-    (pairs.hand), the hand its teeth are to LEAVE with"""
-    import joint_escape as je
+    """{a pair's P leg (the whole route's name): (hand, False)}: the hand each pair's berths in `choice` {net: Move}
+    arrive with (pairs.hand), the hand its teeth are to LEAVE with"""
     import pairs as _pairs
     out = {}
     for _b, (pn, nn) in _pairs.pair_names(list(choice)).items():
@@ -616,7 +619,7 @@ def berth_hands(choice):
             continue
         h = _pairs.hand(pair_travel(a.direction, b.direction), a.exit_pt, b.exit_pt, arriving=True)
         if h:
-            out[je.short_name(pn)] = (h, False)
+            out[pn] = (h, False)
     return out
 
 
@@ -625,11 +628,13 @@ def joint_berths(st, board, choice, log=print):
     balls, as the joint destination plans them) on `board`, the bus preferring `choice` (the ends model's berths), each
     pair arriving with the hand its teeth leave by (teeth_hands) -- the berth each bus net gets"""
     import joint_escape as je
+    from coherent_nets import namer
+    sn = namer(st['byname'])
     spec = json.load(open(awx_settings.req('FANOUT_JOINT')))
     dref = st['dref']
     a = next((x for x in spec['arrays'] if x['ref'] == dref), {'others': [], 'drops': []})
-    prefer = {je.short_name(nm): {'tooth': tuple(m.exit_pt), 'direction': m.direction, 'layer': m.layer,
-                                  'kind': m.kind} for nm, m in choice.items()}
+    prefer = {sn(nm): {'tooth': tuple(m.exit_pt), 'direction': m.direction, 'layer': m.layer,
+                       'kind': m.kind} for nm, m in choice.items()}
     names = [st['byname'][nm][1].name for nm in choice if nm in st['byname']]
     pcb = parse_kicad_pcb(board)
     hands = teeth_hands(pcb, list(choice), st['byname'], st['sref'])
@@ -683,7 +688,7 @@ def joint_berths(st, board, choice, log=print):
     moved = [nm for nm in choice if nm not in out or sr.move_sig(out[nm]) != sr.move_sig(choice[nm])]
     if moved:
         log(f'  berths the joint plan moved: ' + '; '.join(
-            f'{je.short_name(nm)} {desc(choice[nm])} -> {desc(out[nm]) if nm in out else "none"}' for nm in moved))
+            f'{sn(nm)} {desc(choice[nm])} -> {desc(out[nm]) if nm in out else "none"}' for nm in moved))
     return out
 
 
@@ -930,27 +935,29 @@ def _pair_legs_of(base, names):
     return _pairs.pair_names(list(names)).get(base, ())
 
 
-def drc_side_net(side):
-    """The short net name of one side of a check_drc violation line: the kind prefix (`Seg:`, `Pad:`) and the
-    TRAILING annotations stripped (`(REF.PAD)`, `[SHORT]`, `(drill hole clearance)`) -- never split on whitespace:
-    this board's nets are `/DDR3 16x1/SDQ2`, so a space split yields `DDR3`."""
+def drc_side_net(side, keys=None):
+    """The net of one side of a check_drc violation line, by the whole route's name (`keys`, coherent_nets.net_keys),
+    else by its last part: the kind prefix (`Seg:`, `Pad:`) and the TRAILING annotations stripped (`(REF.PAD)`,
+    `[SHORT]`, `(drill hole clearance)`) -- never split on whitespace: a board's nets may be `/DDR3 16x1/SDQ2`, so a
+    space split yields `DDR3`."""
     import re as _re
+    from coherent_nets import key_of
     side = side.strip()
     if ':' in side[:6]:
         side = side.split(':', 1)[1]
     for _ in range(3):
         side = _re.sub(r'\s*\[[^\]]*\]\s*$', '', side)
         side = _re.sub(r'\s*\([^)]*\)\s*$', '', side)
-    return side.strip().split('/')[-1]
+    return key_of(side.strip(), keys)
 
 
-def drc_line_nets(line):
-    """(net, net) of a check_drc violation line `A <-> B`, or None"""
+def drc_line_nets(line, keys=None):
+    """(net, net) of a check_drc violation line `A <-> B`, or None (drc_side_net)"""
     import re as _re
     mt = _re.match(r'^\s*(.+?) <-> (.+?)\s*$', line)
     if not mt:
         return None
-    a, b = drc_side_net(mt.group(1)), drc_side_net(mt.group(2))
+    a, b = drc_side_net(mt.group(1), keys), drc_side_net(mt.group(2), keys)
     return (a, b) if a and b else None
 
 
@@ -1235,7 +1242,8 @@ def plan(base, names, work):
                 if _trial.missed and res_r['rejected']:
                     # (ends) the trial is returned unjudged below, so the moves its DRC names are banned here too: a
                     # rejected trial's moves were never banned, and the next round asked them again
-                    hit = sorted({n for ln in res_r.get('pairs') or () for n in (drc_line_nets(ln) or ())} & set(moves))
+                    hit = sorted({n for ln in res_r.get('pairs') or ()
+                                  for n in (drc_line_nets(ln, net_keys(st['byname'])) or ())} & set(moves))
                     if hit:
                         ban_moves(banned, moves, hit, names)
                 if _trial.missed:
@@ -1245,7 +1253,8 @@ def plan(base, names, work):
                     return None, line
                 if res_r['rejected']:
                     # the moves of the nets its DRC pairs name (all of them when no line names one)
-                    hit = sorted({n for ln in res_r.get('pairs') or () for n in (drc_line_nets(ln) or ())} & set(moves))
+                    hit = sorted({n for ln in res_r.get('pairs') or ()
+                                  for n in (drc_line_nets(ln, net_keys(st['byname'])) or ())} & set(moves))
                     ban_moves(banned, moves, hit or list(moves), names)
                     return None, line
                 st2 = plan_state(parse_kicad_pcb(new_board), names, banned)
@@ -1612,10 +1621,12 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
     engine passes left 8 to 20 of them not as asked, round after round refused; the joint plan places all 47 berths,
     every pair whole. The plan sidecar is written from the berths laid. Returns 0, or 1 where a bus ball is left bare."""
     import joint_escape as je
+    from coherent_nets import namer
+    sn = namer(byname)
     spec = json.load(open(awx_settings.req('FANOUT_JOINT')))
     a = next((x for x in spec['arrays'] if x['ref'] == dref), {'others': [], 'drops': []})
-    prefer = {je.short_name(nm): {'tooth': tuple(m.exit_pt), 'direction': m.direction, 'layer': m.layer,
-                                  'kind': m.kind} for nm, m in choice.items()}
+    prefer = {sn(nm): {'tooth': tuple(m.exit_pt), 'direction': m.direction, 'layer': m.layer,
+                       'kind': m.kind} for nm, m in choice.items()}
     # each pair's berths arriving with the hand its teeth leave by (teeth_hands, on the source as laid)
     sref = next((x['ref'] for x in spec['arrays'] if x['ref'] != dref), None)
     # the source board, named as fanout_destination names it: the whole route's next round starts from it
@@ -1632,7 +1643,7 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
                               vias_only=route_layers.escape_vias('dest'), exit_rays=True, stand_in=stand_in)
     kept = next(r for r in reps if (r['track'], r['via'], r['drill']) == (rung.fan_track, rung.via_size,
                                                                           rung.via_drill))
-    bus_s = {je.short_name(nm) for nm in names}
+    bus_s = {sn(nm) for nm in names}
     laid = {k.split('#')[0]: o for k, (kind, o) in (kept.get('chosen') or {}).items()
             if kind == 'escape' and k.split('#')[0] in bus_s}
     moved = sorted(nm for nm, o in laid.items() if nm in prefer and (
@@ -1662,7 +1673,7 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
     # copper stands (braid_plan_of's `achieved`, as fanout_destination measures it), never the planned exit: the engine's
     # stub ends past it (zynq's U5, 25 um), and the relayer, walking from the planned point along a stub it lies in the
     # middle of, found no run to a via at any of the 25 berths it was to move onto the solve's layers
-    ch_laid = {nm: laid[je.short_name(nm)] for nm in choice if je.short_name(nm) in laid}
+    ch_laid = {nm: laid[sn(nm)] for nm in choice if sn(nm) in laid}
     with contextlib.redirect_stdout(io.StringIO()):
         pcb_out = parse_kicad_pcb(out_path)
         achieved = {nm: sr.measure_tooth(pcb_out, nm, st['dst_pad'][nm], st['byname'], dest_ref=dref)
@@ -1801,10 +1812,16 @@ def hold_array(prev_board, cur, nxt, a, size, layers, stem, why, log=print, in_p
         copy_pro(carried, nxt)
         return
 
+    sn_ = []                # (the ball keys' names, carry's: the carried board's, read once)
+
     def replan(board, out_b, keys):
+        if not sn_:
+            from coherent_nets import namer
+            with contextlib.redirect_stdout(io.StringIO()):
+                sn_.append(namer(parse_kicad_pcb(carried)))
         nets_k = {k.split('#')[0] for k in keys}
-        o_k = sorted(n for n in a['others'] if je.short_name(n) in nets_k)
-        d_k = sorted(n for n in a['drops'] if je.short_name(n) in nets_k)
+        o_k = sorted(n for n in a['others'] if sn_[0](n) in nets_k)
+        d_k = sorted(n for n in a['drops'] if sn_[0](n) in nets_k)
         # (the array's other nets are the engine's filter: it leaves the carried balls as they stand)
         return je.fan_array(board, out_b, ref, [], o_k, layers, drops=d_k, log=log,
                             only=set(keys), rungs=[rung], filter_nets=a['others'])[1][-1]
@@ -2288,7 +2305,8 @@ def row_berths(pcb, dref, targets, choice, dst_pad, byname):
         m = choice.get(nm)
         if m is None and nm in dst_pad:
             own = em.enumerate_moves(dst_pad[nm], grid, route_layers.escape_layers(pcb.board_info.copper_layers),
-                                     lambda p, q, L, _n=nid: te.build_obstacles(pcb, _n, kids, L).seg_clear(p, q))
+                                     lambda p, q, L, _n=nid: te.build_obstacles(pcb, _n, kids, L).seg_clear(p, q),
+                                     net=nm)
             m = own[0] if own else None
         if m is None:
             failed.append(nm)
@@ -2397,7 +2415,8 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
             got_ = row_berths(pcb, r_, tg_, choice, dst_pad, byname)
         else:
             got_ = generate_bga_fanout(
-                pcb.footprints[r_], pcb, net_filter=tg_, layers=route_layers.stacked(pcb.board_info.copper_layers),
+                pcb.footprints[r_], pcb, net_filter=engine_filter(tg_, pcb),
+                layers=route_layers.stacked(pcb.board_info.copper_layers),
                 track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
                 exit_margin=0.5, escape_method='underpad', plane_drop='off',
                 escape_dir_hints=hints)
@@ -2426,7 +2445,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
                         # zynq's NetC146_2 endpoint gap, an earlier step's),
                         # which no fanout of the run's nets made or can mend,
                         # and read whole it failed every fanout of the run
-                        '--nets'] + net_patterns(names),
+                        '--nets'] + net_patterns(names, net_keys(pcb)),
                        capture_output=True, text=True, env=awx_settings.environ())
     _drc_txt = r.stdout + r.stderr
     clean = 'NO DRC VIOLATIONS' in _drc_txt
@@ -2449,8 +2468,9 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
     # out of the feedback, and the loop could print "every berth laid as
     # planned" on a shorted board. Strip the kind prefix and everything
     # from the first space or bracket.
+    keys_ = net_keys(pcb)
     for a, b in _re.findall(r'^\s+(.+?) <-> (.+?)\s*$', _drc_txt, flags=_re.M):
-        a, b = drc_side_net(a), drc_side_net(b)
+        a, b = drc_side_net(a, keys_), drc_side_net(b, keys_)
         if not a or not b:
             continue
         drc_nets.add(a); drc_nets.add(b)

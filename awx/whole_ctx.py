@@ -123,10 +123,10 @@ def part_islands(ctx, skip=(), split=None):
 
 
 def copper_name(ctx, item):
-    """the short name of a base segment's or via's net; copper of NO net -- a footprint's own copper (#908: net 0,
-    its part in owner_ref), which no board's nets list -- by its part"""
+    """the whole route's name of a base segment's or via's net (ctx.net_key); copper of NO net -- a footprint's own
+    copper (#908: net 0, its part in owner_ref), which no board's nets list -- by its part"""
     n_ = ctx.pcb.nets.get(item.net_id) if item.net_id else None
-    return n_.name.split('/')[-1] if n_ is not None else (getattr(item, 'owner_ref', '') or 'no net')
+    return ctx.net_key(n_.name) if n_ is not None else (getattr(item, 'owner_ref', '') or 'no net')
 
 
 def foreign_teeth(ctx, M, boxes):
@@ -268,7 +268,8 @@ def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
     prs = {}
     if bd.PAIRS:
         names, prs = _pairs.members(names)
-    byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+    from coherent_nets import by_key, namer
+    byname = by_key(pcb)
     for b_, (pn_, _nn) in prs.items():
         byname[b_] = byname[pn_]
     pcb2 = copy.copy(pcb)
@@ -295,6 +296,7 @@ def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
         ends[b_] = (_pairs.mid(sp_, sn_), _pairs.mid(tp_, tn_), ends[pn_][2])
         ctx.pair_ends[b_] = ((sp_, sn_), (tp_, tn_))
     ctx.pcb, ctx.byname, ctx.ends, ctx.plan = pcb2, byname, ends, plan
+    ctx.net_key = namer(pcb)                # (a net by the whole route's name for it, coherent_nets.net_keys)
     ctx.kids = {byname[nm][0] for nm in names} | {byname[n][0] for pr_ in prs.values() for n in pr_}
     # (in the run's order, as setup keys them: the frame takes its lanes in it. A pair's are its P leg's)
     leg = lambda nm: prs[nm][0] if nm in prs else nm

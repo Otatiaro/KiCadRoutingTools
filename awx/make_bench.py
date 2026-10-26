@@ -67,6 +67,7 @@ import fanout_from_plan as fp  # noqa: E402
 import source_realize as sr  # noqa: E402  FAN_TRACK / FAN_CLEAR
 import rules as _rules  # noqa: E402  ONE source for every design rule
 import route_layers  # noqa: E402  the routing layers: the first comb's escapes may take any of them
+from coherent_nets import net_keys, by_key, engine_filter  # noqa: E402  the whole route's names for nets
 sys.path.insert(0, os.path.join(HERE, '..', 'py_placer'))
 from placement.writer import write_placed_output  # noqa: E402
 
@@ -153,7 +154,7 @@ def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_m
         extra = dict(diff_pair_patterns=[f'{b}*' for b in diff_pairs],
                      diff_pair_gap=_pairs.GAP)
     tracks, vias_add, vias_rm, failed = generate_bga_fanout(
-        pcb.footprints[src], pcb, net_filter=names,
+        pcb.footprints[src], pcb, net_filter=engine_filter(names, pcb),
         layers=list(layers) if layers else route_layers.stacked(pcb.board_info.copper_layers),
         track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE,
         via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method=escape_method,
@@ -341,8 +342,8 @@ def write_ladder(board, names, log=print, bare_ok=False):
     each net bare at both arrays (braid.bare_lane) a singleton after them: no stub for the rivers' taut paths to read"""
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(board)
-    bn = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
-    short = [n.split('/')[-1] for n in names]
+    bn, keys = by_key(pcb), net_keys(pcb)
+    short = [keys.get(n, n) for n in names]
     ok, bare = [], []
     for n in short:
         try:

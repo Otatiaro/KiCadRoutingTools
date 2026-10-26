@@ -148,8 +148,10 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                     margin: float = 0.0, climb: int = 0,
                     own_line: bool = False, straight: bool = False,
                     street: int = 0, street_pitch: float = 0.0,
-                    street_dirs: Optional[Sequence[str]] = None) -> List[Move]:
-    """Every escape move this pad has. `clear(p, q, layer)` says whether
+                    street_dirs: Optional[Sequence[str]] = None, net: Optional[str] = None) -> List[Move]:
+    """Every escape move this pad has, each named `net` (the whole route's
+    name for the pad's net, coherent_nets.net_keys), else by the last part
+    of the pad's net name. `clear(p, q, layer)` says whether
     a track from p to q on `layer` is free of foreign copper;
     `via_clear(p, layer)` whether a via barrel fits at p (checked on
     every layer by the caller). Moves whose geometry is blocked are not
@@ -162,8 +164,8 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
     of the array, on a lane `street_pitch` from the next, at `street`
     sites along it, the run leaving by `street_dirs` (every face when
     None) -- see the street block."""
-    net = getattr(pad, 'net_name', '') or ''
-    net = net.split('/')[-1]
+    if net is None:
+        net = (getattr(pad, 'net_name', '') or '').split('/')[-1]
     px, py = pad.global_x, pad.global_y
     home = next((L for L in layers if L in pad.layers), layers[0])
     others = [L for L in layers if L != home]

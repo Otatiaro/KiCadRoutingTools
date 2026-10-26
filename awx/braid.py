@@ -5733,10 +5733,12 @@ def net_walks(pcb, nid, net):
     return len(roots) <= 1
 
 
-def drc_line_nets(ln):
-    """The net names a check_drc violation line names: either side of
-    '<->' is 'Seg:NET', 'Via:NET', 'Pad:NET (REF.PIN)' or a bare 'NET'
-    (a track-to-track pair), the net possibly '/'-pathed."""
+def drc_line_nets(ln, keys=None):
+    """The nets a check_drc violation line names, by the whole route's names
+    (`keys`, coherent_nets.net_keys): either side of '<->' is 'Seg:NET',
+    'Via:NET', 'Pad:NET (REF.PIN)' or a bare 'NET' (a track-to-track pair),
+    the net possibly '/'-pathed."""
+    from coherent_nets import key_of
     out = set()
     if '<->' not in ln or ln.lstrip().startswith('Checking'):   # the checker's own header carries a '<->'
         return out
@@ -5744,7 +5746,7 @@ def drc_line_nets(ln):
         tok = side.strip().split()[0] if side.strip() else ''
         if ':' in tok:
             tok = tok.split(':', 1)[1]
-        tok = tok.split('/')[-1].strip('(),')
+        tok = key_of(tok.strip('(),'), keys).strip('(),')
         if tok:
             out.add(tok)
     return out
@@ -5941,10 +5943,12 @@ def _apply_source_splice(ctx, nm, lane, chain, verts, path, j, pr, run, saving, 
         # the nets the new violations name, other than this one: what a
         # coupled re-lay (pack_board) would have to lift for this splice
         _blk = set()
+        from coherent_nets import net_keys
+        _keys = net_keys(pcb)
         for _ln in v1:
             if _ln in v0:
                 continue
-            _blk |= {t_ for t_ in drc_line_nets(_ln) if t_ != nm}
+            _blk |= {t_ for t_ in drc_line_nets(_ln, _keys) if t_ != nm}
         if hasattr(ctx, 'src_trim_refused'):
             ctx.src_trim_refused.setdefault(nm, []).append((saving, d, s_at, frozenset(_blk)))
         log(f'  source stub trim {nm}: splice {d:.2f} mm at stub depth {s_at:.1f} would add DRC ({n0} -> {n1}): '
@@ -6704,8 +6708,9 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     its corridors from the identical inputs -- so the two cannot drift.
     Without it (or for nets the plan does not name) everything is read
     off the board as before."""
+    from coherent_nets import by_key
     pcb = parse_kicad_pcb(board)
-    byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+    byname = by_key(pcb)
     # PAIR MEMBERS (BRAID_PAIRS, pairs.py): the two legs of a differential
     # pair become ONE member named after the pair. The P leg's net stands
     # in wherever a member needs a net id (the obstacle models, the
@@ -6793,7 +6798,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
         CY = mirror_axis(pcb)     # the engine's own rule: a lattice line
         pcb, M = to_front_frame(pcb, dest_refs(dest)[0])
         ctx.M = M
-        byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+        byname = by_key(pcb)
         _standin(byname)
         if plan:
             plan = mirror_plan(plan, M)
@@ -6874,6 +6879,8 @@ def setup(board, names, dest, log, plan=None, pairs=False):
         ctx.pair_ends[_b] = ((sp_, sn_), (tp_, tn_))
     ctx.pairs = _pairs_here
     ctx.pcb, ctx.byname, ctx.ends, ctx.kids = pcb, byname, ends, kids
+    from coherent_nets import namer
+    ctx.net_key = namer(pcb)                # (a net by the whole route's name for it, coherent_nets.net_keys)
     ctx.plan = plan
     ctx.tooth_layer = {nm: (plan['tooth_layer'][nm] if nm in planned else
                             _layer_at(pcb, byname[nm][0], ends[nm][0], 'F.Cu'))
@@ -7205,7 +7212,9 @@ def _write_layer_jumps(board_path, names):
     except Exception:
         return []
     want = set(names)
-    by = {i: n.name.split('/')[-1] for i, n in pcb.nets.items()}
+    from coherent_nets import namer
+    sn = namer(pcb)
+    by = {i: sn(n.name) for i, n in pcb.nets.items()}
     ends = _c.defaultdict(lambda: _c.defaultdict(set))
     holes = _c.defaultdict(list)
     for sg in pcb.segments:

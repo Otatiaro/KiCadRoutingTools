@@ -252,7 +252,9 @@ def side_fences(pcb, box, skip, out=FENCE_OUT):
     import route_layers
     lays = set(route_layers.layers())
     x0, x1 = box[0] - out, box[2] + out
-    name = lambda i: pcb.nets[i].name.split('/')[-1] if i in pcb.nets else ''
+    from coherent_nets import namer
+    sn = namer(pcb)
+    name = lambda i: sn(pcb.nets[i].name) if i in pcb.nets else ''
     res = {}
     for side, y in (('N', box[1] - out), ('S', box[3] + out)):
         xs = []
@@ -2838,6 +2840,7 @@ def plane_ways(st, lanes, T, B, cur):
     import pair_teeth as pt
     import source_realize as sr
     from escape_moves import DIRS
+    from coherent_nets import namer
     with open(path, encoding='utf-8') as f:
         spec = json.load(f)
     pcb = st['pcb']
@@ -2852,10 +2855,10 @@ def plane_ways(st, lanes, T, B, cur):
         foot = pcb0.footprints.get(ref)
         if ar is None or foot is None:
             continue
-        drop_s = ({je.short_name(n) for n in ar.get('drops', ())} - {je.short_name(n) for n in ar.get('others', ())}
-                  - run)
-        items = {f'{je.short_name(p.net_name)}#{p.pad_number}': (je.short_name(p.net_name), p)
-                 for p in foot.pads if p.net_id and p.net_name and je.short_name(p.net_name) in drop_s}
+        sn = namer(pcb)
+        drop_s = ({sn(n) for n in ar.get('drops', ())} - {sn(n) for n in ar.get('others', ())} - run)
+        items = {f'{sn(p.net_name)}#{p.pad_number}': (sn(p.net_name), p)
+                 for p in foot.pads if p.net_id and p.net_name and sn(p.net_name) in drop_s}
         if not items:
             continue
         grid = em.grid_of(foot)

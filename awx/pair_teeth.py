@@ -178,10 +178,12 @@ def main(argv):
     board, nets_arg, refs = args.board, args.nets, args.refs
     names = ([ln.strip() for ln in open(nets_arg) if ln.strip()] if os.path.isfile(nets_arg)
              else [n for n in nets_arg.split(',') if n])
-    bus = {n.split('/')[-1] for n in names}
+    from coherent_nets import namer
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         pcb = parse_kicad_pcb(board)
-    name_of = {i: n.name.split('/')[-1] for i, n in pcb.nets.items() if n.name}
+    sn = namer(pcb)
+    bus = {sn(n) for n in names}
+    name_of = {i: sn(n.name) for i, n in pcb.nets.items() if n.name}
     prs = _pairs.pair_names(sorted(bus), admit_all=True)
     legs = {leg for pn, nn in prs.values() for leg in (pn, nn)}
     segs = [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer, s.net_id) for s in pcb.segments]

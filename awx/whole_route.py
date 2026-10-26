@@ -298,9 +298,11 @@ def _tracks_of(bench):
             pcb = parse_kicad_pcb(bench)
         lays = list(route_layers.layers())
         by = collections.defaultdict(list)
+        from coherent_nets import namer
+        sn = namer(pcb)
         for s_ in pcb.segments:
             if s_.layer in lays and not getattr(s_, 'graphic', False):
-                nm = pcb.nets[s_.net_id].name.split('/')[-1] if s_.net_id in pcb.nets else ''
+                nm = sn(pcb.nets[s_.net_id].name) if s_.net_id in pcb.nets else ''
                 by[_layer_index(s_.layer)].append((s_.start_x, s_.start_y, s_.end_x, s_.end_y, s_.width / 2, nm))
         import plan_audit as _pa
         ka_ = _pa.keepout_areas(pcb, lays)
@@ -925,7 +927,9 @@ def grade_counts(board, nets):
     with contextlib.redirect_stdout(io.StringIO()):
         from kicad_parser import parse_kicad_pcb
         p = parse_kicad_pcb(board)
-    nm = {i: n.name.split('/')[-1] for i, n in p.nets.items()}
+    from coherent_nets import namer
+    sn = namer(p)
+    nm = {i: sn(n.name) for i, n in p.nets.items()}
     return (str(sum(1 for v in p.vias if nm.get(v.net_id) in nets)),
             str(round(sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) for s in p.segments
                           if nm.get(s.net_id) in nets))))
@@ -960,8 +964,10 @@ def drc_count(json_path):
     return int(J.get('violations', 0)) - n, n
 
 
-def open_nets(conn_log):
-    """the nets (short names) check_connected's log finds open: unrouted, or in pieces"""
+def open_nets(conn_log, keys=None):
+    """the nets check_connected's log finds open: unrouted, or in pieces -- by the whole route's names (`keys`,
+    coherent_nets.net_keys), else by their last parts"""
+    from coherent_nets import key_of
     out, mode = set(), None
     for ln in lines_of(conn_log):
         s = ln.strip()
@@ -970,9 +976,9 @@ def open_nets(conn_log):
         elif s.startswith('Connectivity issues'):
             mode = 'c'
         elif mode == 'u' and s.endswith('pads)'):
-            out.add(s.split(' (')[0].split('/')[-1])
+            out.add(key_of(s.split(' (')[0], keys))
         elif mode == 'c' and '(net ' in s and s.endswith(':'):
-            out.add(s.split(' (net')[0].split('/')[-1])
+            out.add(key_of(s.split(' (net')[0], keys))
     return out
 
 
@@ -1076,7 +1082,9 @@ def repair_ends(d, loopd, env, nets, say):
         from bga_fanout.flip_frame import mirror_axis
         CY = mirror_axis(parse_kicad_pcb(bench0))
     pcbB = parse_kicad_pcb(env['BENCH'])
-    n2n = {i: n.name.split('/')[-1] for i, n in pcbB.nets.items()}
+    from coherent_nets import namer
+    sn = namer(pcbB)
+    n2n = {i: sn(n.name) for i, n in pcbB.nets.items()}
     bus = set(nets)
 
     def seg_d(p, a, b):
@@ -1372,7 +1380,8 @@ def no_ends(bench, nets, dest):
     if rest:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             pcb = parse_kicad_pcb(bench)
-        bn = {n_.name.split('/')[-1]: (i, n_) for i, n_ in pcb.nets.items()}
+        from coherent_nets import by_key
+        bn = by_key(pcb)
         for n in rest:
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
@@ -1451,6 +1460,14 @@ def chain(K, o, R=3, base=None, dest=None, settings=None):
     # clean one): the chain never ends with nothing when a round had a plan to lay
     best = None
     nets_all = [n for n in NETS.split(',') if n]
+    # (the board's nets by the whole route's names, coherent_nets.net_keys: each round's grade selects and reads its
+    # nets by them)
+    if PYR not in sys.path:
+        sys.path.insert(0, PYR)
+    from kicad_parser import parse_kicad_pcb
+    from coherent_nets import net_keys
+    with contextlib.redirect_stdout(io.StringIO()):
+        keys_ = net_keys(parse_kicad_pcb(base if os.path.isabs(base) else os.path.join(HERE, base)))
 
     def advance(d, base):
         """the next round's base: this round's realized source board (its fo.log names it), else `base` as it was --
@@ -1480,7 +1497,7 @@ def chain(K, o, R=3, base=None, dest=None, settings=None):
         if not os.path.isfile(seq):
             return None
         from coherent_nets import net_patterns
-        pats = net_patterns(nets_all)
+        pats = net_patterns(nets_all, keys_)
         # (the checkers by the path the shell gives them, from awx/: their logs echo it; always in a process of
         # their own: they are the harness's grade, not the route, and a checker run as a script installs its
         # command-line banner -- the CMD / EXIT echo -- for its whole process)
@@ -1503,7 +1520,7 @@ def chain(K, o, R=3, base=None, dest=None, settings=None):
         if not quiet:
             say(g)
         return dict(key=(int(dc != 0), nopen, int(v), int(c)), open=nopen, drc=int(dc != 0), grade=g, board=seq,
-                    open_nets=sorted(open_nets(os.path.join(d, f'conn{tag}.log'))) if nopen else [],
+                    open_nets=sorted(open_nets(os.path.join(d, f'conn{tag}.log'), keys_)) if nopen else [],
                     tag=tag)
 
     def lane_legs():

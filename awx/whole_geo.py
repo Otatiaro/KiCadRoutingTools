@@ -349,7 +349,7 @@ for v_ in ctx.base_vias:
         # geometry had never seen it) -- a disc on every layer, the router's ring about it, as a stub's via
         r = max(v_.size / 2, _pairs.svia_reach(ctx.cfg, v_.x, v_.y, v_.size)) \
             if (awx_settings.get('SVIA_RING') or '1') == '1' else v_.size / 2
-        VSTUB.append((v_.x - r, v_.y - r, v_.x + r, v_.y + r, ALL(), 'svia ' + ctx.pcb.nets[v_.net_id].name.split('/')[-1]
+        VSTUB.append((v_.x - r, v_.y - r, v_.x + r, v_.y + r, ALL(), 'svia ' + ctx.net_key(ctx.pcb.nets[v_.net_id].name)
                       if v_.net_id in ctx.pcb.nets else 'svia', None))
 # ... and the LANES keep off the stub copper within a clearance block of the line, and off the stub vias
 for st_ in LSTUB + [v for v in VSTUB if v[5].startswith('svia ')]:

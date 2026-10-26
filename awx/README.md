@@ -253,12 +253,13 @@ bus laid, in the board's own frame:
 - the bus is every net between the two arrays that the ladder admits, and
   their copper, if any, is stripped. Refused and named, for the rest of the
   chain: a pair through a termination part between the arrays (the zynq's CK
-  through R20: the whole route lays no waypoint yet); a net whose name's last
-  part is another net's too (the zynq's `ENABLE` and `TEST/ENABLE`: the whole
-  route names a net by it, and the router's net patterns would take both);
-  and a pair leg whose partner is refused or is no lane between the arrays
-  (the zynq's `FB_CLK_P`, its `FB_CLK_N` pulled to RFGND by RX22) -- a pair
-  is laid whole or not at all;
+  through R20: the whole route lays no waypoint yet); and a pair leg whose
+  partner is refused or is no lane between the arrays (the zynq's `FB_CLK_P`,
+  its `FB_CLK_N` pulled to RFGND by RX22) -- a pair is laid whole or not at
+  all. The whole route names a net by its name's last path part where no
+  other net's name ends in it, else by its full name (`ENABLE` and
+  `TEST/ENABLE` are two lanes): `coherent_nets.net_keys`, and every pattern
+  the step hands a checker or the fanout engine selects that net alone;
 - the source array is fanned out for them, and the board is turned into the
   flow frame;
 - the whole route runs on the ladder's nets (`--k K` for its first K). A
@@ -2352,6 +2353,31 @@ channels first, and the other escapes leave round it.
     on its ball line;
   - a lane whose dive found no room given its ball's dog-bone the next round,
     its change then the dog-bone's own via.
+- **Each outer ball's kind chosen per lane.** The escape fanout fixes every
+  ball's kind once, before any plan, by its own geometry: an outer ball with a
+  clear stub out is left bare, every other ball dog-boned, and the ends model
+  chooses among the escapes that leaves -- a bare ball's surface escapes, a
+  dog-boned ball's via escapes, never one for the other. Where a lane changes
+  layer -- at its ball, or in the room between the arrays -- is thereby
+  settled before anything has measured either place. To try:
+  - **the first kinds from the lane:** a ball left bare where its lane can stay
+    on its layer -- the other end on the same layer, a pair's legs in the same
+    order at both arrays, the layer's room between the arrays not taken by
+    other copper -- and both ends dog-boned where the lane must change layer
+    anyway, unless the change is better made in the gap;
+  - **the price of each place to change:** a via at the ball takes the gap
+    points the deeper balls of its row escape between, toward that face, on
+    the layers below; a change in the gap takes room the other lanes' changes
+    and a crossed pair's crossover need there;
+  - **the solve's feedback, both ways, each round:** a lane whose change in the
+    gap found no room dog-boned at its ball next round; a dog-boned ball whose
+    lane ran the outer layer end to end left bare, its two vias and its gap
+    point freed; a row whose deeper balls found no way out under a via given a
+    bare outer ball;
+  - **the field planned whole with the kinds in it:** a shared array's joint
+    field already offers each ball its four gap sites, a via in its pad and no
+    via at all as parts of its moves (`joint_escape.escape_field`); the same
+    for the bus's own arrays, the kinds the feedback chose as its preferences.
 - **The loop's immediate stop on crowded ends.** A loop round whose audit
   finds a pitch or a static clearance at the ends stops the loop at once
   (`whole_feedback --now`), and the round lays the plan its loop held,
@@ -2465,9 +2491,6 @@ channels first, and the other escapes leave round it.
   - a plane ball whose in-plane drop sites are the bus's own copper (the
     zynq's U1 V19: the bus alone dog-bones it outside its pour) given one by
     moving a bus ball's dog-bone, the bus's teeth kept.
-- **Nets by their full names.** The whole route names a net by its name's
-  last path part, so the step refuses a bus net whose last part is another
-  net's too.
 - **Parts in the solve.** The solve knows of a part in the lanes' way only
   where a lane was found blocked by it -- an end's planned change, the loop's
   layer cut; the geometry fits the lanes round every other part afterwards,

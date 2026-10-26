@@ -39,6 +39,7 @@ import escape_moves as em  # noqa: E402
 
 from escape_moves import DIRS  # noqa: E402,F401  -- ONE source
 import route_layers  # noqa: E402  the routing layers: a re-fan's runs may take any of them
+from coherent_nets import namer, net_keys, net_patterns, engine_filter  # noqa: E402  the whole route's names
 GAP_TOL = 0.2      # mm: an achieved tooth this close to the asked exit is the same gap
 
 
@@ -375,9 +376,10 @@ def audit(asked, achieved, original, laid, log, label):
                      'layer': n_lay, 'kind': n_kind, 'gap': n_gap, 'order': oa}
 
 
-def drc_pairs(board, nets=None, pcb_data=None):
+def drc_pairs(board, nets=None, pcb_data=None, keys=None):
     """The DRC violation lines of `board` at the fanout's floor. `nets`
-    (short names): only checks involving one of them -- sound when every
+    (the whole route's names: `keys`, else `pcb_data`'s, coherent_nets.
+    net_keys): only checks involving one of them -- sound when every
     other piece of copper was clean before, i.e. when the caller changed
     only those nets on a clean board (2026-09-18: a probe's fanout board
     is such a board; the whole-board check was 0.47 s of a 6.6 s probe).
@@ -400,7 +402,7 @@ def drc_pairs(board, nets=None, pcb_data=None):
                 _fn.apply_stamps_in_memory(_fn.via_protection_stamps(pcb_data.vias, [], pcb_data)[0])
             except Exception:                                    # noqa: BLE001
                 pass
-        pats = [f'*/{n}' for n in nets] + list(nets)
+        pats = net_patterns(nets, keys if keys is not None else net_keys(pcb_data) if pcb_data is not None else None)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             try:
@@ -462,13 +464,14 @@ def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=pri
     hand `hands` asks (its berths', fanout_from_plan.berth_hands). Returns the engine's (tracks, vias to add, vias to
     remove, failed nets)."""
     import joint_escape as _je
+    sn = namer(pcb)
     a = next((x for x in jspec['arrays'] if x['ref'] == sref), {'others': [], 'drops': []})
     dref = next((x['ref'] for x in jspec['arrays'] if x['ref'] != sref), None)
     full = [byname[nm][1].name for nm in names]
-    prefer = {_je.short_name(nm): {'tooth': tuple(m.exit_pt), 'direction': m.direction, 'layer': m.layer,
-                                   'kind': m.kind} for nm, m in src_choice.items()}
+    prefer = {sn(nm): {'tooth': tuple(m.exit_pt), 'direction': m.direction, 'layer': m.layer,
+                       'kind': m.kind} for nm, m in src_choice.items()}
     for nm, g in (kept or {}).items():
-        prefer.setdefault(_je.short_name(nm), {k: g[k] for k in ('tooth', 'direction', 'layer', 'kind')})
+        prefer.setdefault(sn(nm), {k: g[k] for k in ('tooth', 'direction', 'layer', 'kind')})
     far = _je.far_face(pcb, sref, dref) if dref and dref in pcb.footprints else None
     import route_layers
     hints, rep = _je.plan_array(pcb, sref, full, a['others'], jspec['layers'], far=far, prefer=prefer,
@@ -487,13 +490,13 @@ def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=pri
         + (f'; UNPLANNED {unplanned}' if unplanned else ''))
     spec = {'net_layers': {n: _je.bus_route_layers(pcb) for n in full}, 'priority': list(full)}
     tracks, vias_add, vias_rm, failed = generate_bga_fanout(
-        pcb.footprints[sref], pcb, net_filter=full, layers=list(pcb.board_info.copper_layers),
+        pcb.footprints[sref], pcb, net_filter=engine_filter(full, pcb), layers=list(pcb.board_info.copper_layers),
         track_width=FAN_TRACK, clearance=FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
         exit_margin=0.5, escape_method='jointescape', plane_drop='off', escape_dir_hints=hints, bus=spec)
     tracks, vias_add, gated = _je.keep_pair_gates(pcb, sref, hints, tracks, vias_add)
     if gated:
         log(f'  source realize (joint plan of {sref}): left out, through a planned pair\'s gate: '
-            + ', '.join(sorted(pcb.nets[i].name.split('/')[-1] for i in gated)))
+            + ', '.join(sorted(sn(pcb.nets[i].name) for i in gated)))
     return tracks, vias_add, vias_rm, failed
 
 
@@ -588,7 +591,8 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
         # every foreign track on the board, which a partial re-fan of an
         # already-fanned array needs.
         tracks, vias_add, vias_rm, failed = generate_bga_fanout(
-            pcb.footprints[sref], pcb, net_filter=names, layers=route_layers.stacked(pcb.board_info.copper_layers),
+            pcb.footprints[sref], pcb, net_filter=engine_filter(names, pcb),
+            layers=route_layers.stacked(pcb.board_info.copper_layers),
             track_width=FAN_TRACK, clearance=FAN_CLEAR, via_size=te.VIA_SIZE,
             via_drill=te.VIA_DRILL,
             exit_margin=0.5, escape_method='underpad', plane_drop='off',
@@ -653,7 +657,7 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
         drift = [nm for nm in others if before[nm][0] != after[nm][0]]
         log(f'  source realize: {len(others) - len(drift)}/{len(others)} unmoved '
             f'teeth unchanged' + (f'; DRIFTED: {", ".join(drift)}' if drift else ''))
-    pairs = drc_pairs(out_path, nets=list(src_choice) if clean_base else None)
+    pairs = drc_pairs(out_path, nets=list(src_choice) if clean_base else None, keys=net_keys(byname))
     if jspec is not None and pairs:
         # (the joint fanout: a pad of a movable passive is the cap placement step's to move off this copper -- the
         # plan and the engine laid round it as not there, and a pair against it is no reason to refuse the board;

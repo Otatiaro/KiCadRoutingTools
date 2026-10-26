@@ -71,10 +71,12 @@ def quarter_of(pcb, dest, names):
     destination centroid vector along +x, and the lattice point nearest
     the destination array's centre to turn about (DEST naming several
     parts: their pads together, about the first's centre)."""
+    from coherent_nets import namer
+    sn = namer(pcb)
     src, dst = [], []
     dests = set(dest_refs(dest))
     for nid, net in pcb.nets.items():
-        nm = net.name.split('/')[-1]
+        nm = sn(net.name)
         if nm not in names:
             continue
         for p in net.pads:

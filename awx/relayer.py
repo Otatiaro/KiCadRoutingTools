@@ -113,7 +113,8 @@ def relayer(board, out, moves, log=print):
     from kicad_writer import remove_segments_from_content, add_tracks_and_vias_to_pcb
     with contextlib.redirect_stdout(io.StringIO()):
         pcb = parse_kicad_pcb(board)
-    byname = {n.name.split('/')[-1]: i for i, n in pcb.nets.items() if n.name}
+    from coherent_nets import by_key
+    byname = {k: i for k, (i, n) in by_key(pcb).items() if n.name}
     strip, add, moved, left, at_via = [], [], [], [], []
 
     def got_of(m_):
