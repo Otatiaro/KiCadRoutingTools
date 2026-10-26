@@ -51,6 +51,7 @@ from kicad_writer import add_tracks_and_vias_to_pcb  # noqa: E402
 import escape_moves as em  # noqa: E402
 import route_layers  # noqa: E402
 import rules as _rules  # noqa: E402
+from relayer import TOL as _END_TOL  # noqa: E402
 
 SIDE = 2          # a sidestep: up to this many pitches past the lines beside the via
 PAST = 1.0        # the exit: this many pitches past the outer balls
@@ -167,7 +168,17 @@ class Copper:
 
 
 def dedupe(pts):
-    return [q for j, q in enumerate(pts) if j == 0 or math.hypot(q[0] - pts[j - 1][0], q[1] - pts[j - 1][1]) > 1e-6]
+    """a path's points, those within the relayer's TOL of the one before merged -- the later kept, so the path still
+    ends on its exit, and its first point stays the via. A leg shorter than that is no leg: the relayer, walking the
+    stub back from its end, reads it and the leg before it as a fork and leaves the end's layer as the fanout laid it
+    (an outer ring's dog-bone 6 nm short of the exit line: a 6 nm last leg, its lane held to that layer by the solve)"""
+    out = [pts[0]]
+    for q in pts[1:]:
+        if math.hypot(q[0] - out[-1][0], q[1] - out[-1][1]) > _END_TOL:
+            out.append(q)
+        elif len(out) > 1:
+            out[-1] = q
+    return out
 
 
 def own_via(pcb, pad, nid, grid):
