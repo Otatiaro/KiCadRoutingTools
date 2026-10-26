@@ -262,9 +262,10 @@ class PlacementModel:
         """
         if not patterns:
             return set()
-        from net_queries import matches_net_filter
+        from net_queries import matches_net_filter, board_net_names
+        _bn = board_net_names(self.pcb)
         return {nid for nid, n in self.pcb.nets.items()
-                if nid > 0 and n.name and matches_net_filter(n.name, list(patterns))}
+                if nid > 0 and n.name and matches_net_filter(n.name, list(patterns), _bn)}
 
     def refs_of_nets(self, net_ids) -> set:
         refs = set()

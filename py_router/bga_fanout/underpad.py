@@ -819,6 +819,10 @@ def generate_underpad_escape(footprint: Footprint,
     _zone_net_names = {pcb_data.nets[z.net_id].name
                        for z in (getattr(pcb_data, 'zones', None) or [])
                        if z.net_id in pcb_data.nets}
+    # (a net named short in the logs below: its last part, else in full -- two nets never one name)
+    from net_queries import short_net_names
+    _short_nm = short_net_names(pcb_data)
+    _sn = lambda name: _short_nm.get(name, (name or '').split('/')[-1])   # noqa: E731
 
     def is_plane(p):
         # A high-pin-count net is only treated as a plane (skip its fanout, keep
@@ -2748,7 +2752,7 @@ def generate_underpad_escape(footprint: Footprint,
                   + f", {_nd['in_pad']} in pad"
                   + (f", {_nd['shared']} sharing a gap via" if _nd['shared'] else '') + ")"
                   + (f"; {len(_left)} left to the drop pass: "
-                     + ', '.join(f"{q.net_name.split('/')[-1]} {q.pad_number}" for q in _left) if _left else ''))
+                     + ', '.join(f"{_sn(q.net_name)} {q.pad_number}" for q in _left) if _left else ''))
 
     # Plan-follow, part 1 (planned FULL moves, see _move_of): these balls
     # leave the generic phases -- Phase A would lay a surface escape for a
@@ -3453,7 +3457,7 @@ def generate_underpad_escape(footprint: Footprint,
                 q = by_id[i]
                 return (-depth(q), str(q.net_name), str(q.pad_number))
             bl = sorted(bl, key=_bl_key)
-            _bl_names = [by_id[i].net_name.split('/')[-1] for i in bl]
+            _bl_names = [_sn(by_id[i].net_name) for i in bl]
             before = dict(alive)
             s0 = score(alive)
             for pid in bl:
@@ -3525,7 +3529,7 @@ def generate_underpad_escape(footprint: Footprint,
                 if e.get('got') and e['face'] and e['gap'] and e['layer'] and not e['reserve_miss']:
                     continue
                 mv = e['asked']
-                nm = f"{p.net_name.split('/')[-1]} {p.pad_number}"
+                nm = f"{_sn(p.net_name)} {p.pad_number}"
                 ask = (f"{mv.get('kind')}/{mv['face']}/{str(mv.get('layer'))[:1]}"
                        + (f"@({mv['exit'][0]:.2f},{mv['exit'][1]:.2f})" if mv.get('exit') else '@(face only)'))
                 if e.get('got'):
@@ -3537,7 +3541,7 @@ def generate_underpad_escape(footprint: Footprint,
                 else:
                     print(f"    {nm}: asked {ask} -> NOT escaped")
             for nm, why in neg_log:
-                print(f"    negotiation {nm.split('/')[-1]}: {why}")
+                print(f"    negotiation {_sn(nm)}: {why}")
 
     n_db_esc = 0
     # (the joint escape: part 2 runs BEFORE the generic phases -- after them,
@@ -3622,7 +3626,7 @@ def generate_underpad_escape(footprint: Footprint,
         if verbose:
             print(f"  Plan straps: {_laid}/{len(_strap_balls) + len(_plane_straps)} laid"
                   + (f"; {len(_back)} left to the generic phases (a plane ball's to the drop pass): "
-                     + ', '.join(f"{_q.net_name.split('/')[-1]} {_q.pad_number}" for _q in _back) if _back else ''))
+                     + ', '.join(f"{_sn(_q.net_name)} {_q.pad_number}" for _q in _back) if _back else ''))
 
     if joint:
         inner_pads = _generic_phases()

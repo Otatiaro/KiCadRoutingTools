@@ -3118,10 +3118,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # it in both --nets and --rip-existing-nets is a no-op. Warn instead of
     # staying silent.
     if rip_existing_nets and net_names:
-        from net_queries import matches_net_filter as _mnf_ripwarn
+        from net_queries import matches_net_filter as _mnf_ripwarn, board_net_names as _bnn_ripwarn
+        _bn_ripwarn = _bnn_ripwarn(pcb_data)
         _rip_noop = [n for n, _reason in _already_routed
                      if not _reason.startswith('Only')
-                     and _mnf_ripwarn(n, rip_existing_nets)]
+                     and _mnf_ripwarn(n, rip_existing_nets, _bn_ripwarn)]
         if _rip_noop:
             print(f"WARNING: {len(_rip_noop)} net(s) named in both --nets and "
                   f"--rip-existing-nets are already fully connected and will "
@@ -3146,13 +3147,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             and (output_file or return_results)
             and not _plane_finalize_active()
             and os.environ.get('KICAD_PLANE_FINALIZE', '1') == '1'):
-        from net_queries import matches_net_filter as _mnf1112
+        # (`net_names` are names, resolved exactly -- resolve_net_ids -- never
+        # patterns: a zone net is in scope when it is one of them)
+        _scope1112 = set(net_names or ())
         _finalize_zone_nets1112 = sorted({
             pcb_data.nets[_z.net_id].name for _z in pour_zones(pcb_data.zones)
             if _z.net_id in pcb_data.nets and _z.net_id != 0
             and (_z.layer or '').endswith('.Cu')
             and (not net_names
-                 or _mnf1112(pcb_data.nets[_z.net_id].name, net_names))})
+                 or pcb_data.nets[_z.net_id].name in _scope1112)})
     if not net_ids and _finalize_zone_nets1112:
         print(f"All nets are already connected by the router's fill model - "
               f"nothing to route; continuing to the plane finalize for "
@@ -3485,7 +3488,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # 'no rippable blockers found'.
     existing_rippable: List[int] = []
     if rip_existing_nets:
-        from net_queries import matches_net_filter
+        from net_queries import matches_net_filter, board_net_names
+        _bn_rip = board_net_names(pcb_data)     # (a literal names the net it is: named_net)
         to_route_set = set(all_net_ids_to_route)
         # A TEARDROP zone is routing output on a signal net, not a pour: a
         # teardropped net stays rip-eligible (`pour_zones`, #1164).
@@ -3499,7 +3503,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             net = pcb_data.nets.get(nid)
             if not net or not net.name:
                 continue
-            if matches_net_filter(net.name, rip_existing_nets):
+            if matches_net_filter(net.name, rip_existing_nets, _bn_rip):
                 existing_rippable.append(nid)
         # #521: protected nets (length-matched groups, routed diff pairs --
         # recorded in the sibling .kicad_pro by the step that made them) are
@@ -3639,7 +3643,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if (rip_preexisting
             if rip_preexisting is not None
             else os.environ.get('KICAD_RIP_PREEXISTING', '1') != '0'):
-        from net_queries import split_net_patterns, net_pattern_matches
+        from net_queries import split_net_patterns, net_pattern_matches, board_net_names
+        _pe_names = board_net_names(pcb_data)   # (a literal names the net it is: named_net)
         _pe_to_route = set(all_net_ids_to_route)
         _pe_zone_nids = {z.net_id for z in pour_zones(pcb_data.zones)}
         _pe_seen = set(existing_rippable)
@@ -3665,7 +3670,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # (split_net_patterns keeps active-low literals like '!RESET'
             # selectable by name, so those don't read as negations here).
             _, _pe_exc = split_net_patterns(_pe_caller_pats, {_pe_net.name})
-            if any(net_pattern_matches(_pe_net.name, _p) for _p in _pe_exc):
+            if any(net_pattern_matches(_pe_net.name, _p, _pe_names) for _p in _pe_exc):
                 continue
             _pe_auto.append(_nid)
         if _pe_auto:
@@ -5157,9 +5162,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                          (getattr(state, 'terminal_restores', None)
                           or {}).items() if v != 'full'},
         }
+        from net_queries import short_net_names as _snn734
+        _short734 = _snn734(pcb_data)
         for _bk, _bs in _b734.items():
             if _bs:
-                _nmz = sorted((pcb_data.nets[n].name.split('/')[-1]
+                _nmz = sorted((_short734.get(pcb_data.nets[n].name, pcb_data.nets[n].name)
                                if n in pcb_data.nets else str(n))
                               for n in _bs)[:12]
                 print(f"  [scope-dbg] disturbed[{_bk}] = {len(_bs)}: {_nmz}")
@@ -5183,7 +5190,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # _preexisting_rips registry (or its entry was replaced by the
         # rip/restore machinery, dropping the flag) and still audits.
         if os.environ.get('KICAD_SCOPE_DEBUG'):
-            _nm734 = (pcb_data.nets[_nid].name.split('/')[-1]
+            from net_queries import short_net_names as _snn734b
+            _nm734 = (_snn734b(pcb_data).get(pcb_data.nets[_nid].name, pcb_data.nets[_nid].name)
                       if _nid in pcb_data.nets else str(_nid))
             print(f"  [scope-dbg] audit {_nm734}: registered="
                   f"{_nid in _pe_reg734} "
@@ -6813,10 +6821,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # scoped retry chain `route.py --nets 'SDRAM_*'` after a pour
             # is a realistic shape that hits this).
             if net_names:
-                from net_queries import matches_net_filter as _mnf9
-                _excluded9 = sorted({n for n, _l in _zpairs
-                                     if not _mnf9(n, net_names)})
-                _zpairs = [(n, l) for n, l in _zpairs if _mnf9(n, net_names)]
+                # (`net_names` are names, resolved exactly: a zone net is in
+                # scope when it is one of them, never a namesake of one)
+                _scope9 = set(net_names)
+                _excluded9 = sorted({n for n, _l in _zpairs if n not in _scope9})
+                _zpairs = [(n, l) for n, l in _zpairs if n in _scope9]
                 if _excluded9:
                     print(f"{RED}  Plane finalize: zone net(s) "
                           f"{', '.join(_excluded9)} are OUTSIDE this route's "
@@ -7719,8 +7728,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # lap-authority harvest below.)
                 if not (_names and net_names):
                     return list(_names or [])
-                from net_queries import (matches_net_filter as _mnf,
-                                         split_net_patterns as _snp)
+                from net_queries import split_net_patterns as _snp
                 # PROTECTED names are dropped here UNCONDITIONALLY: the
                 # #521 override door ("an exact name overrides") exists for
                 # DELIBERATE operator naming, and #103 hints are machine-
@@ -7732,19 +7740,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 from protected_nets import protection_map as _pm103
                 _prot103 = _pm103(pcb_data, input_file)
                 _all_names103 = {n.name for n in pcb_data.nets.values()}
-                _, _neg103 = _snp(net_names, _all_names103)
+                # (the negations are the caller's PATTERNS -- `net_names` are
+                # names, already expanded, and carry none)
+                _, _neg103 = _snp(list(net_name_patterns if net_name_patterns is not None
+                                       else net_names), _all_names103)
                 from net_queries import net_pattern_matches as _npm103
                 _zone_ids103 = {z.net_id
                                 for z in (getattr(pcb_data, 'zones', None)
                                           or [])}
+                _scope103 = set(net_names)
                 _keep103 = []
                 for _bn in _names:
                     if _bn in _prot103:
                         continue                       # protected: NEVER
-                    if _mnf(_bn, net_names):
+                    if _bn in _scope103:
                         _keep103.append(_bn)          # in scope: as before
                         continue
-                    if any(_npm103(_bn, _p) for _p in _neg103):
+                    if any(_npm103(_bn, _p, _all_names103) for _p in _neg103):
                         continue                       # negated BY PLAN
                     _bid = next((i for i, nn in pcb_data.nets.items()
                                  if nn.name == _bn), None)
@@ -7836,7 +7848,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _pn5 = list(_rk.get('power_nets') or [])
             _pw5 = list(_rk.get('power_nets_widths') or [])
             if len(_pn5) == len(_pw5):
-                from net_queries import matches_net_filter as _mnf5
+                from net_queries import identify_power_nets as _ipn5, literal_net_pattern as _lit5
+                # (the nets the caller's --power-nets give a width, as the
+                # width channel itself reads them -- identify_power_nets)
+                _explicit5 = _ipn5(pcb_data, _pn5, _pw5) if _pn5 else {}
                 _tw5 = _rk.get('track_width') or config.track_width
                 for _nid5 in _rec_ids:
                     _w5 = _orig_w5.get(_nid5, 0.0)
@@ -7844,9 +7859,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if _nid5 in pcb_data.nets else None)
                     if not _nm5 or _w5 <= (_tw5 or 0.0) + 1e-6:
                         continue
-                    if _pn5 and _mnf5(_nm5, _pn5):
+                    if _nid5 in _explicit5:
                         continue  # explicit power width wins
-                    _pn5.append(_nm5)
+                    _pn5.append(_lit5(_nm5))
                     _pw5.append(_w5)
                     print(f"  Preserving routed width {_w5}mm for reconciled "
                           f"net {_nm5} (original copper was wider than this "

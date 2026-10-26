@@ -1032,9 +1032,10 @@ def direct_route_candidates(pcb_data, footprint, net_filter=None,
     for pad in footprint.pads:
         if pad.net_id in qualified and pad.net_name:
             id_to_name[pad.net_id] = pad.net_name
-    from net_queries import matches_net_filter
+    from net_queries import matches_net_filter, board_net_names
+    _bnames = board_net_names(pcb_data)
     for nid, nm in id_to_name.items():
-        if net_filter and not matches_net_filter(nm, net_filter):
+        if net_filter and not matches_net_filter(nm, net_filter, _bnames):
             continue
         names.add(nm)
     notes = [n for n in notes if n[0] in names]
@@ -1085,6 +1086,8 @@ def under_part_candidates(pcb_data, footprint, net_filter=None):
         if pad.net_id > 0 and not pad.drill:
             balls.setdefault(pad.net_id, []).append(pad)
     names, notes = set(), []
+    from net_queries import matches_net_filter, board_net_names
+    _bnames = board_net_names(pcb_data) if net_filter else None
     for nid, pads in balls.items():
         nm = pads[0].net_name
         if not nm or nm.lower().startswith('unconnected-'):
@@ -1097,8 +1100,7 @@ def under_part_candidates(pcb_data, footprint, net_filter=None):
         if not all(x0 <= t.global_x <= x1 and y0 <= t.global_y <= y1 for t in targets):
             continue
         if net_filter:
-            from net_queries import matches_net_filter
-            if not matches_net_filter(nm, net_filter):
+            if not matches_net_filter(nm, net_filter, _bnames):
                 continue
         names.add(nm)
         for pad in pads:

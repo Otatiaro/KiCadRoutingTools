@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import routing_defaults as defaults
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData, find_components_by_type
-from net_queries import matches_net_filter
+from net_queries import matches_net_filter, board_net_names
 from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation  # noqa: F401
 from list_nets import escalation_rungs
 from kicad_writer import add_tracks_and_vias_to_pcb
@@ -2887,6 +2887,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
     """
     _entry_args = dict(locals())   # the call as made, for the face wrapper below
+    _bnames = board_net_names(pcb_data)     # (a literal names the net it is: net_queries.named_net)
     if bus and escape_method != 'jointescape':
         raise ValueError("bga_fanout: `bus` is the joint escape engine's (escape_method='jointescape'); another "
                          "engine would lay the balls without its constraints")
@@ -3118,7 +3119,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     if (_pad_filter is None and not _single_pass
             and env_knobs.FANOUT_DIRECT):
         from bga_fanout.escape import direct_route_candidates
-        _dp_probe = (find_differential_pairs(footprint, diff_pair_patterns)
+        _dp_probe = (find_differential_pairs(footprint, diff_pair_patterns, _bnames)
                      if diff_pair_patterns else None)
         _names, _notes = direct_route_candidates(
             pcb_data, footprint, net_filter=net_filter,
@@ -3172,7 +3173,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
         _nc_ids = single_pad_net_ids(footprint, pcb_data)
         _pair_nets: Set[str] = set()
         if diff_pair_patterns:
-            for _pr in find_differential_pairs(footprint, diff_pair_patterns).values():
+            for _pr in find_differential_pairs(footprint, diff_pair_patterns, _bnames).values():
                 if _pr.p_pad and _pr.p_pad.net_name:
                     _pair_nets.add(_pr.p_pad.net_name)
                 if _pr.n_pad and _pr.n_pad.net_name:
@@ -3201,7 +3202,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 continue
             if _p.net_name in _pair_nets:
                 continue
-            if net_filter and not matches_net_filter(_p.net_name, net_filter):
+            if net_filter and not matches_net_filter(_p.net_name, net_filter, _bnames):
                 continue
             if _p.net_id in _seen_nets:
                 _extras.append(_p)
@@ -3452,7 +3453,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             _cands = [_p for _p in footprint.pads if _p.net_id and _p.net_name
                       and not _p.net_name.lower().startswith('unconnected-')
                       and _p.net_id not in _nc_ids and _p.net_id not in _prefanned
-                      and (not net_filter or matches_net_filter(_p.net_name, net_filter))]
+                      and (not net_filter or matches_net_filter(_p.net_name, net_filter, _bnames))]
 
             def _score(vs, ts):
                 bare, cov = 0, {}
@@ -3598,10 +3599,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
         from bga_fanout.underpad import generate_underpad_escape
         net_filter_fn = None
         if net_filter:
-            net_filter_fn = lambda name: matches_net_filter(name, net_filter)
+            net_filter_fn = lambda name: matches_net_filter(name, net_filter, _bnames)
         # Differential pairs (issue #182): escape each pair coupled so route_diff
         # can pick the two halves up (without this they go single-ended).
-        up_diff_pairs = (find_differential_pairs(footprint, diff_pair_patterns)
+        up_diff_pairs = (find_differential_pairs(footprint, diff_pair_patterns, _bnames)
                          if diff_pair_patterns else {})
         if _direct_route_nets:
             up_diff_pairs = {k: v for k, v in up_diff_pairs.items()
@@ -3700,7 +3701,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     pair_escape_assignments: Dict[str, Tuple[Optional[Channel], str]] = {}
     _pair_toward: Dict[str, str] = {}  # #469 pair target-side preference
     if diff_pair_patterns:
-        diff_pairs = find_differential_pairs(footprint, diff_pair_patterns)
+        diff_pairs = find_differential_pairs(footprint, diff_pair_patterns, _bnames)
         if _direct_route_nets:
             diff_pairs = {k: v for k, v in diff_pairs.items()
                           if not ((v.p_pad and v.p_pad.net_name in _direct_route_nets)
@@ -3808,7 +3809,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             continue
         if pad.net_id in nc_net_ids:
             continue
-        if net_filter and not matches_net_filter(pad.net_name, net_filter):
+        if net_filter and not matches_net_filter(pad.net_name, net_filter, _bnames):
             continue
         # Escape-priority pass restriction (issue #129): only the pass's own
         # balls are routed; _ignore_prefanned lets pass 2 fan the extra balls
@@ -3957,7 +3958,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             if pad.net_id in nc_net_ids:
                 continue
 
-            if net_filter and not matches_net_filter(pad.net_name, net_filter):
+            if net_filter and not matches_net_filter(pad.net_name, net_filter, _bnames):
                 continue
 
             # Escape-priority pass restriction (issue #129): only this pass's
@@ -4448,6 +4449,7 @@ def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
     """
     nc_net_ids = single_pad_net_ids(footprint, pcb_data)
     fp_net_counts = Counter(p.net_name for p in footprint.pads if p.net_id)
+    _bnames = board_net_names(pcb_data)     # (a literal names the net it is: net_queries.named_net)
     names: Set[str] = set()
     for pad in footprint.pads:
         if not pad.net_name or pad.net_id == 0:
@@ -4456,7 +4458,7 @@ def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
             continue
         if pad.net_id in nc_net_ids:
             continue
-        if net_filter and not matches_net_filter(pad.net_name, net_filter):
+        if net_filter and not matches_net_filter(pad.net_name, net_filter, _bnames):
             continue
         if not net_filter and fp_net_counts[pad.net_name] >= plane_min_pads:
             continue                                   # plane / dense rail ball
@@ -4496,6 +4498,7 @@ def generate_plane_drops(footprint: Footprint,
     respected (idempotent re-runs); failures are reported, never fatal -- the
     plane step's tap search remains the fallback.
     """
+    _bnames = board_net_names(pcb_data)     # (a literal names the net it is: net_queries.named_net)
     fp_pads = [p for p in footprint.pads if p.net_id]
     counts = Counter(p.net_name for p in fp_pads)
     from kicad_parser import pour_zones
@@ -4504,7 +4507,7 @@ def generate_plane_drops(footprint: Footprint,
     drop_ids: Set[int] = set()
     for p in fp_pads:
         if net_filter is not None:
-            if matches_net_filter(p.net_name, net_filter):
+            if matches_net_filter(p.net_name, net_filter, _bnames):
                 continue                      # fanned as a signal, not a plane
             if counts[p.net_name] >= plane_min_pads or p.net_id in zone_ids:
                 drop_ids.add(p.net_id)
@@ -4530,7 +4533,7 @@ def generate_plane_drops(footprint: Footprint,
     from bga_fanout.underpad import generate_underpad_escape
     net_filter_fn = None
     if net_filter:
-        net_filter_fn = lambda name: matches_net_filter(name, net_filter)
+        net_filter_fn = lambda name: matches_net_filter(name, net_filter, _bnames)
     rep: Dict = {}
     d_tracks, d_vias, _failed = generate_underpad_escape(
         footprint, pcb_data, grid, layers or ['F.Cu', 'B.Cu'],

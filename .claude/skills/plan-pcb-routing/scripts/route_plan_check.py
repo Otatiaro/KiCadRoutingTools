@@ -43,7 +43,6 @@ every run. An unchecked rule that says so is honest; one that is silently
 absent is the failure this whole issue is about.
 """
 import argparse
-import fnmatch
 import os
 import re
 import sys
@@ -377,14 +376,14 @@ def _globs(argv, flag):
 
 
 def _claims(argv, net):
-    """Does this route step's `--nets` take `net`? The router's own order:
-    the include patterns add, a `!` pattern removes (fnmatch either way)."""
+    """Does this route step's `--nets` take `net`? The router's own matcher
+    (net_queries.matches_net_filter): the include patterns add, a `!` pattern
+    removes, a name with no sheet path takes a sheet's net too ('!GND'
+    removes '/GND'). The plan carries no board, so a literal is not narrowed
+    to the net of its own name (named_net) here."""
+    from net_queries import matches_net_filter
     pats = values(argv, '--nets')
-    if any(n.startswith('!') and fnmatch.fnmatchcase(net, n[1:])
-           for n in pats):
-        return False
-    return any(not n.startswith('!') and fnmatch.fnmatchcase(net, n)
-               for n in pats)
+    return bool(pats) and matches_net_filter(net, list(pats))
 
 
 def r_net_coverage_reconciles(p):

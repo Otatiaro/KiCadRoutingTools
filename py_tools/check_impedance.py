@@ -541,7 +541,8 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             "is still checked (it only needs the layer order).")
 
     # Which nets?
-    from net_queries import matches_net_filter
+    from net_queries import matches_net_filter, board_net_names
+    _bn = board_net_names(pcb)     # (a literal names the net it is: net_queries.named_net)
     segments_by_net: Dict[int, List] = {}
     for seg in pcb.segments:
         if not seg.net_id:
@@ -564,7 +565,7 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
     for net_id in sorted(segments_by_net):
         net = pcb.nets.get(net_id)
         name = net.name if net else f"<net {net_id}>"
-        if net_patterns and not matches_net_filter(name, net_patterns):
+        if net_patterns and not matches_net_filter(name, net_patterns, _bn):
             continue
         if net_id in pour_nets and not include_plane_nets:
             skipped_plane_nets += 1

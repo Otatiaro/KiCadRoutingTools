@@ -228,7 +228,8 @@ def corridors_from_intent(state, pcb_data, specs: Sequence[Dict]
     dialect as `route.py --nets`, via the shared matcher, so a pattern means
     here what it means there.
     """
-    from net_queries import matches_net_filter
+    from net_queries import matches_net_filter, board_net_names
+    _bn = board_net_names(pcb_data)     # (a literal names the net it is: net_queries.named_net)
     out: List[Corridor] = []
     for spec in specs:
         pats = list(spec.get('nets') or ())
@@ -236,7 +237,7 @@ def corridors_from_intent(state, pcb_data, specs: Sequence[Dict]
             continue
         ids = tuple(sorted(
             nid for nid, n in pcb_data.nets.items()
-            if nid > 0 and n.name and matches_net_filter(n.name, pats)))
+            if nid > 0 and n.name and matches_net_filter(n.name, pats, _bn)))
         if len(ids) < 2:
             continue
         a, b = _cluster_ends(state, ids)
@@ -800,10 +801,11 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
             out['bus_corridors_phantom'] = phantom
         classes = spec.get('classes') or {}
         if classes:
-            from net_queries import matches_net_filter
+            from net_queries import matches_net_filter, board_net_names
+            _bn = board_net_names(pcb_data)
             cn = {cls: [nid for nid, n in pcb_data.nets.items()
                         if nid > 0 and n.name
-                        and matches_net_filter(n.name, list(pats))]
+                        and matches_net_filter(n.name, list(pats), _bn)]
                   for cls, pats in classes.items()}
             out['convergence'] = [
                 {'corridor': name, 'classes': cls}

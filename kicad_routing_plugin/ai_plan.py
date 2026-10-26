@@ -1000,7 +1000,7 @@ def _precedes_first_plane_step(step, all_steps):
     return idx is None or idx < first
 
 
-def _drop_plane_nets(names, globs, plane_nets, notes, label):
+def _drop_plane_nets(names, globs, plane_nets, notes, label, net_names=None):
     """Drop the plan's declared plane nets from a WILDCARD-matched selection;
     a glob naming one verbatim keeps it (explicit override).
 
@@ -1014,11 +1014,13 @@ def _drop_plane_nets(names, globs, plane_nets, notes, label):
         return names
     from net_queries import net_pattern_matches
     # "Names it verbatim" is sheet-path aware too (#493): a plan that says 'GND'
-    # is explicitly asking for the board's '/GND'. Wildcards never count as
-    # explicit -- dropping wildcard-selected plane nets is the whole point.
+    # is explicitly asking for the board's '/GND' -- and, with the board's net
+    # names, for the net called GND alone where there is one (named_net).
+    # Wildcards never count as explicit -- dropping wildcard-selected plane nets
+    # is the whole point.
     literal = {n for n in plane_nets
                for g in (globs or [])
-               if '*' not in g and '?' not in g and net_pattern_matches(n, g)}
+               if '*' not in g and '?' not in g and net_pattern_matches(n, g, net_names)}
     excluded = sorted(n for n in names if n in plane_nets and n not in literal)
     if excluded:
         notes.append(f"{label}: plan plane nets excluded {', '.join(excluded)}")
@@ -1030,6 +1032,7 @@ def apply_step_selection(step, dialog, all_steps=None):
     """Apply the step's net/pair/component/assignment selection (also re-run
     right before executing the step, since consecutive steps of the same
     action share one tab's selection state). Returns notes."""
+    from net_queries import board_net_names
     notes = []
     action = step["action"]
     plane_nets = _plan_plane_nets(all_steps, dialog)
@@ -1065,7 +1068,8 @@ def apply_step_selection(step, dialog, all_steps=None):
         # the plane steps left disconnected (#479).
         if _precedes_first_plane_step(step, all_steps):
             _matched = names
-            names = _drop_plane_nets(names, globs, plane_nets, notes, "route")
+            names = _drop_plane_nets(names, globs, plane_nets, notes, "route",
+                                     board_net_names(dialog.pcb_data))
             if _matched and not names:
                 dialog._plan_step_noop = ("every net it selects is a plan "
                                           "plane net, excluded before the "
@@ -1109,7 +1113,8 @@ def apply_step_selection(step, dialog, all_steps=None):
         globs = step.get("nets") or ["*"]
         names = _component_net_names(dialog.pcb_data, ref, globs)
         _matched = names
-        names = _drop_plane_nets(names, globs, plane_nets, notes, "fanout")
+        names = _drop_plane_nets(names, globs, plane_nets, notes, "fanout",
+                                 board_net_names(dialog.pcb_data))
         if _matched and not names:
             dialog._plan_step_noop = ("every net it selects is a plan plane "
                                       "net, excluded from the fanout")
@@ -1175,8 +1180,8 @@ def _match_net_names(pcb_data, globs):
             continue
         # Sheet-path aware, like the CLI's expand_net_patterns (#493): an
         # unqualified '!GND' must exclude the board's '/GND'.
-        if any(net_pattern_matches(net.name, g) for g in includes) and \
-                not any(net_pattern_matches(net.name, g) for g in excludes):
+        if any(net_pattern_matches(net.name, g, known_names) for g in includes) and \
+                not any(net_pattern_matches(net.name, g, known_names) for g in excludes):
             names.append(net.name)
     return names
 
@@ -1264,12 +1269,13 @@ def _component_net_names(pcb_data, ref, globs):
     include/exclude semantics (matches_net_filter) so a replayed plan selects the
     same nets the recorded CLI command did.
     """
-    from net_queries import matches_net_filter, nets_for_components
+    from net_queries import matches_net_filter, nets_for_components, board_net_names
     # #537: resolve the reference through the shared helper so a replayed plan
     # selects the same nets the recorded CLI command did. 'glob' keeps this
     # path's exact-reference matching (a plan names one real footprint).
     sel = nets_for_components(pcb_data, [ref], match='glob')
-    return sorted(n for n in sel.net_names if matches_net_filter(n, globs))
+    return sorted(n for n in sel.net_names
+                  if matches_net_filter(n, globs, board_net_names(pcb_data)))
 
 
 def _select_component(net_panel, ref):

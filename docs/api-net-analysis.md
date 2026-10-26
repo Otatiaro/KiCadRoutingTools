@@ -17,7 +17,7 @@ import path: `PYTHONPATH=py_router python3 <your script>` (see the
 #### `matches_net_filter`
 
 ```python
-matches_net_filter(net_name: str, patterns: List[str]) -> bool
+matches_net_filter(net_name: str, patterns: List[str], net_names=None) -> bool
 ```
 
 fnmatch-style wildcards (`*`, `?`), with `!` prefix for exclusion. A name
@@ -27,9 +27,14 @@ exclusion pattern. Exclusion-only lists match everything not excluded.
 Matching is case-sensitive and sheet-path aware (`net_pattern_matches`,
 #493): a pattern with no `/` (`GND`, `VCC*`) also matches the last path
 component of a hierarchical net, so `GND` matches `/GND` and `/Analog/GND`;
-a pattern with a `/` is matched against the full name only. A `!`-pattern
-that names a net verbatim is that active-low net, not an exclusion (`!RESET`),
-and `\!FOO` is always the literal name `!FOO` (#177).
+a pattern with a `/` is matched against the full name only. With the board's
+net names (`net_names`, from `board_net_names(pcb_data)`) a LITERAL with no
+`/` that is itself a net's whole name names that net alone (`named_net`):
+`ENABLE` is the net `ENABLE`, never also a sheet's
+`TEST/ENABLE`, and `GND` is not also a sheet-local `/Expansion/GND` that is a
+separate net. Every caller holding the board passes them. A `!`-pattern that
+names a net verbatim is that active-low net, not an exclusion (`!RESET`), and
+`\!FOO` is always the literal name `!FOO` (#177).
 
 #### `expand_net_patterns`
 

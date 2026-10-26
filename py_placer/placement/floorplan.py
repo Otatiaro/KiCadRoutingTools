@@ -9069,11 +9069,12 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
                         [z.name for z in intent.blocks if z.rect])
         exempt = spec.get('affinity_exempt_nets')
         if exempt:
-            from net_queries import matches_net_filter
+            from net_queries import matches_net_filter, board_net_names
+            _bn = board_net_names(pcb_data)
             spec['affinity_exempt_net_ids'] = [
                 nid for nid, n in pcb_data.nets.items()
                 if nid > 0 and n.name
-                and matches_net_filter(n.name, list(exempt))]
+                and matches_net_filter(n.name, list(exempt), _bn)]
         health_out = routability.health(state, pcb_data, blocks, spec)
 
     roster = stale = None

@@ -25,7 +25,7 @@ from kicad_writer import add_tracks_and_vias_to_pcb
 from qfn_fanout.types import QFNLayout, PadInfo, FanoutStub
 from bga_fanout.constants import POSITION_TOLERANCE
 from bga_fanout import single_pad_net_ids
-from net_queries import matches_net_filter
+from net_queries import matches_net_filter, board_net_names
 from qfn_fanout.layout import analyze_qfn_layout, analyze_pad, single_line_reason
 from qfn_fanout.geometry import calculate_fanout_stub
 
@@ -1661,6 +1661,7 @@ def generate_qfn_fanout(footprint: Footprint,
     # QFN fan used to escape them, and on a CM5 module 33 of 70 new vias were
     # on such nets. Same predicate, same disclosure.
     nc_net_ids = single_pad_net_ids(footprint, pcb_data)
+    _bnames = board_net_names(pcb_data)     # (a literal names the net it is: net_queries.named_net)
     if nc_net_ids:
         print(f"  Skipping {len(nc_net_ids)} single-pad/NC net(s) "
               f"(nothing to connect to)")
@@ -1676,7 +1677,7 @@ def generate_qfn_fanout(footprint: Footprint,
         if pad.net_id in nc_net_ids:
             continue
 
-        if net_filter and not matches_net_filter(pad.net_name, net_filter):
+        if net_filter and not matches_net_filter(pad.net_name, net_filter, _bnames):
             continue
 
         pad_info = analyze_pad(pad, layout)

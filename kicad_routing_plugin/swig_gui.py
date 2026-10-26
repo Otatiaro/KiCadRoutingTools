@@ -3401,26 +3401,32 @@ class RoutingDialog(wx.Dialog):
         # Suggested net -> layer mappings to offer.
         suggestions = [('GND', 'B.Cu'), ('VCC', 'F.Cu')]
 
-        def normalize(name):
-            return name.lstrip('/').upper() if name else ''
+        # The selected net each suggestion names, as it appears in the PCB: the
+        # net of that name, else the root sheet's (net_queries.named_net: 'GND'
+        # is GND, and never also a sheet's separate /Expansion/GND), else the one
+        # selected net that spells it in another case.
+        from net_queries import named_net
 
-        # Map normalized -> actual selected name (so we add the assignment using
-        # the exact net name as it appears in the PCB).
-        selected_by_norm = {normalize(n): n for n in selected_nets}
+        def selected_net(want):
+            one = named_net(want, set(selected_nets))
+            if one is not None:
+                return one
+            alike = [n for n in selected_nets if n and n.lstrip('/').upper() == want.upper()]
+            return alike[0] if len(alike) == 1 else None
 
         # Existing zones in the loaded PCB - skip suggesting these.
         existing_zone_keys = set()
         from kicad_parser import pour_zones
         # POURS only: a teardrop (#1164) is not "this net already pours here".
         for z in pour_zones(getattr(self.pcb_data, 'zones', None)):
-            existing_zone_keys.add((normalize(z.net_name), z.layer))
+            existing_zone_keys.add((z.net_name, z.layer))
 
         to_offer = []  # list of (actual_net_name, layer)
-        for net_norm, layer in suggestions:
-            if net_norm not in selected_by_norm:
+        for want, layer in suggestions:
+            actual = selected_net(want)
+            if actual is None:
                 continue
-            actual = selected_by_norm[net_norm]
-            if (net_norm, layer) in existing_zone_keys:
+            if (actual, layer) in existing_zone_keys:
                 continue
             if (actual, layer) in self._plane_prompt_dismissed:
                 continue

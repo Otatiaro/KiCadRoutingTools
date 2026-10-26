@@ -60,7 +60,10 @@ values it consumes the tokens after it, so pass the output via `--output` or put
 A pattern prefixed with `!` excludes the nets it matches (`--nets "*" "!GND"`);
 a list of exclusions only implies `*`. A pattern without a sheet path (`GND`,
 `VCC*`) also matches the last path component of a hierarchical net (`/GND`),
-so the plain spelling works on a sheet-qualified board. A `!`-name that is
+so the plain spelling works on a sheet-qualified board -- except that a plain
+name which IS a net's whole name selects that net alone: `ENABLE` never also
+takes a sheet's `TEST/ENABLE`, and the run says
+which namesakes it left out (name them to take them too). A `!`-name that is
 itself a net on the board is that net (an active-low signal), and `\!` escapes
 the `!`. `unconnected-*` nets are left out of a wildcard; name one to route
 it.

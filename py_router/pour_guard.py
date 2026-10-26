@@ -76,21 +76,22 @@ def out_of_scope_zone_nets(pcb_data, net_names, routed_ids,
     """{net_id: name} of the zone nets on `layers` that this run neither
     routes nor repairs.
 
-    Out of scope = not matched by the caller's net filter (the test the plane
-    finalize uses to exclude a zone net BY PLAN) and not among `routed_ids`
-    (the nets the run routes or may rip). No filter means every net is in
-    scope, as it is for the finalize."""
+    Out of scope = not one of the caller's `net_names` (the run's nets, by
+    name -- the test the plane finalize uses to exclude a zone net BY PLAN:
+    a name, never a namesake of one on another sheet) and not among
+    `routed_ids` (the nets the run routes or may rip). No names means every
+    net is in scope, as it is for the finalize."""
     if not net_names:
         return {}
-    from net_queries import matches_net_filter
     layers = set(layers or ())
     routed = set(routed_ids or ())
+    scope = set(net_names)
     out: Dict[int, str] = {}
     for z in pour_zones(getattr(pcb_data, 'zones', None) or []):
         if not z.net_id or z.net_id in routed or z.layer not in layers:
             continue
         name = _zone_net_name(pcb_data, z)
-        if not name or matches_net_filter(name, net_names):
+        if not name or name in scope:
             continue
         out[z.net_id] = name
     return out

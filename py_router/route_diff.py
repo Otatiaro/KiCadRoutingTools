@@ -60,7 +60,8 @@ from net_queries import (
     find_differential_pairs, get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position,
     expand_net_patterns, matches_diff_pair_patterns,
-    resolve_gnd_net_id, gnd_candidate_names, filter_routable_nets
+    resolve_gnd_net_id, gnd_candidate_names, filter_routable_nets,
+    literal_net_pattern, board_net_names
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
@@ -681,7 +682,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
     # #1293: a pair whose P<->N clearance a coupled-pair rule sets is floored
     # at that rule alone (per pair, below), never at #441 / #530 / #1145.
-    _target_pairs = list(find_differential_pairs(pcb_data, net_names).values())
+    _target_pairs = list(find_differential_pairs(pcb_data, [literal_net_pattern(n) for n in net_names]).values())
     _coupled_floor, _coupled_map = coupled_pair_floors(
         pcb_data, input_file, _target_pairs, _routable_layers)
     for _pair in _target_pairs:
@@ -864,7 +865,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                                    copper_layers=_cu_all)
             _by_layer = {l: set() for l in layers}
             _scoped = False     # a layer-scoped rule sizes some member somewhere
-            for _pn, _pr in find_differential_pairs(pcb_data, net_names).items():
+            for _pn, _pr in find_differential_pairs(pcb_data, [literal_net_pattern(n) for n in net_names]).items():
                 for nid in (_pr.p_net_id, _pr.n_net_id):
                     _base = _dr.draw_size('track_width', nid, default=track_width,
                                           diff_pair=_pn)
@@ -987,7 +988,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     config.coupled_pair_clearances = _coupled_map
 
     # Find differential pairs from all provided nets
-    diff_pairs: Dict[str, DiffPairNet] = find_differential_pairs(pcb_data, net_names)
+    diff_pairs: Dict[str, DiffPairNet] = find_differential_pairs(pcb_data, [literal_net_pattern(n) for n in net_names])
     diff_pair_net_ids = set()  # Net IDs that are part of differential pairs
 
     # Detect AC-coupled XNets (#196): differential pairs split into two base-named
@@ -1036,10 +1037,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         from protected_nets import locked_net_names
         _locked_names = locked_net_names(pcb_data)
         _locked_pairs = []
+        # (a literal naming a net or a pair's base names that one: named_net)
+        _ps_names = board_net_names(pcb_data)
+        _ps_bases = {p.base_name for p in diff_pairs.values()}
         for pair in diff_pairs.values():
             pair.polarity_swap_allowed = any(
                 matches_diff_pair_patterns(nname, pair.base_name,
-                                           polarity_swap_nets)
+                                           polarity_swap_nets, _ps_names, _ps_bases)
                 for nname in (pair.p_net_name, pair.n_net_name) if nname)
             if pair.polarity_swap_allowed and (
                     pair.p_net_name in _locked_names

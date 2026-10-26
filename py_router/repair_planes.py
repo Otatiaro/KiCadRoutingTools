@@ -1463,16 +1463,19 @@ def repair_planes(
             _pn = list(power_nets or [])
             _pw = list(power_nets_widths or [])
             if len(_pn) == len(_pw):
-                from net_queries import matches_net_filter as _mnf517
+                from net_queries import identify_power_nets as _ipn517, literal_net_pattern as _lit517
+                # (the nets the caller's --power-nets give a width, as the width
+                # channel itself reads them -- identify_power_nets)
+                _explicit517 = _ipn517(pcb_data, _pn, _pw) if _pn else {}
                 for _cnid in _rip_ids:
                     _cw = _input_net_widths.get(_cnid, 0.0)
                     _cn = (pcb_data.nets[_cnid].name
                            if _cnid in pcb_data.nets else None)
                     if not _cn or _cw <= (track_width or 0.0) + 1e-6:
                         continue
-                    if _pn and _mnf517(_cn, _pn):
+                    if _cnid in _explicit517:
                         continue
-                    _pn.append(_cn)
+                    _pn.append(_lit517(_cn))
                     _pw.append(_cw)
             # The repair edited pcb_data's copper in place: invalidate what was
             # cached against it before the sub-run looks anything up (#1146 audit).
@@ -2057,16 +2060,19 @@ def repair_planes(
                 _pn = list(power_nets or [])
                 _pw = list(power_nets_widths or [])
                 if len(_pn) == len(_pw):  # only merge when the pair is coherent
-                    from net_queries import matches_net_filter as _mnf513
+                    from net_queries import identify_power_nets as _ipn513, literal_net_pattern as _lit513
+                    # (the nets the caller's --power-nets give a width, as the
+                    # width channel itself reads them -- identify_power_nets)
+                    _explicit513 = _ipn513(pcb_data, _pn, _pw) if _pn else {}
                     for _cnid in _casualties:
                         _cw = _input_net_widths.get(_cnid, 0.0)
                         _cn = (pcb_data.nets[_cnid].name
                                if _cnid in pcb_data.nets else None)
                         if not _cn or _cw <= (track_width or 0.0) + 1e-6:
                             continue
-                        if _pn and _mnf513(_cn, _pn):
+                        if _cnid in _explicit513:
                             continue  # explicit power width wins
-                        _pn.append(_cn)
+                        _pn.append(_lit513(_cn))
                         _pw.append(_cw)
                         print(f"  Preserving routed width {_cw}mm for ripped "
                               f"net {_cn} across the reconnect (this run's "

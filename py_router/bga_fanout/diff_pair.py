@@ -13,7 +13,8 @@ from bga_fanout.types import DiffPairPads
 
 
 def find_differential_pairs(footprint: Footprint,
-                           diff_pair_patterns: List[str]) -> Dict[str, DiffPairPads]:
+                           diff_pair_patterns: List[str],
+                           net_names=None) -> Dict[str, DiffPairPads]:
     """
     Find all differential pairs in a footprint matching the given patterns.
 
@@ -25,6 +26,8 @@ def find_differential_pairs(footprint: Footprint,
     Args:
         footprint: The footprint to search
         diff_pair_patterns: Glob patterns for nets to treat as diff pairs
+        net_names: The board's net names (net_queries.board_net_names): a
+            literal naming a net, or a pair's base, names that one alone
 
     Returns:
         Dict mapping base_name to DiffPairPads
@@ -33,6 +36,7 @@ def find_differential_pairs(footprint: Footprint,
     # convention (e.g. CLK+ pairs with CLK-, never with an unrelated CLK_N)
     pairs: Dict[tuple, DiffPairPads] = {}
     matched_keys = set()
+    halves = []
 
     # Collect all diff-pair halves, regardless of pattern, so a pattern that
     # only catches one half can still pull in its sibling below.
@@ -55,8 +59,11 @@ def find_differential_pairs(footprint: Footprint,
             pairs[key].p_pad = pad
         else:
             pairs[key].n_pad = pad
+        halves.append((pad.net_name, base_name, key))
 
-        if matches_diff_pair_patterns(pad.net_name, base_name, diff_pair_patterns):
+    bases = {k[0] for k in pairs}
+    for net_name, base_name, key in halves:
+        if matches_diff_pair_patterns(net_name, base_name, diff_pair_patterns, net_names, bases):
             matched_keys.add(key)
 
     # Filter to only complete pairs whose key was matched, keyed by base name

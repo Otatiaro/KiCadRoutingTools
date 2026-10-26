@@ -52,7 +52,26 @@ def split_net_patterns(patterns: List[str],
     return include_patterns, exclude_patterns
 
 
-def net_pattern_matches(net_name: str, pattern: str) -> bool:
+_NET_GLOB_CHARS = '*?['
+
+
+def named_net(pattern: str, net_names) -> Optional[str]:
+    """The ONE net a literal pattern with no path names on a board whose net
+    names are `net_names`: the net of exactly that name -- or None, when the
+    pattern is a wildcard, carries a path, or names no net whole.
+
+    Two nets may end in one name: a global label ENABLE and a sheet's
+    TEST/ENABLE, GND and a sheet-local /Expansion/GND that is a separate
+    two-pad net. The name selects the net it IS; only a name no net carries
+    whole takes every sheet's net ending in it (net_pattern_matches, #493:
+    'GND' for /GND and /Analog/GND). A net with a path is named exactly by
+    its full name already."""
+    if not net_names or '/' in pattern or any(c in pattern for c in _NET_GLOB_CHARS):
+        return None
+    return pattern if pattern in net_names else None
+
+
+def net_pattern_matches(net_name: str, pattern: str, net_names=None) -> bool:
     """Match one net name against one fnmatch pattern, sheet-path aware (#493).
 
     KiCad qualifies a net with the sheet it was declared on, so the board's net
@@ -69,17 +88,28 @@ def net_pattern_matches(net_name: str, pattern: str) -> bool:
     pattern that DOES carry a path ('/GND', '/Sheet/*') is taken literally and
     only ever full-matched, so an explicit spelling stays exact.
 
+    With the board's net names (`net_names`), a LITERAL with no path that is a
+    net's whole name names that net alone (named_net): 'ENABLE' is the global
+    label ENABLE and never the sheet's TEST/ENABLE, 'GND' never also a
+    sheet-local /Expansion/GND that is a separate net. Every caller that has
+    the board passes them.
+
         net_pattern_matches('/GND', 'GND')                  -> True
         net_pattern_matches('/Analog/GND', 'GND')           -> True
         net_pattern_matches('/GND_A', 'GND')                -> False
         net_pattern_matches('/GND', '/GND')                 -> True
         net_pattern_matches('/Analog/GND', '/GND')          -> False  (path given)
+        net_pattern_matches('/Expansion/GND', 'GND', {'GND', '/Expansion/GND'})
+                                                            -> False  (GND is it)
 
     Case-SENSITIVE on every platform (#1208), as netclass membership is
     (`list_nets`): plain `fnmatch.fnmatch` applies `os.path.normcase`, which
     case-folds on Windows only, so `/*PCIE*` selected `/PCIe-M2/FB` there and
     nowhere else.
     """
+    one = named_net(pattern, net_names)
+    if one is not None:
+        return net_name == one
     if fnmatch.fnmatchcase(net_name, pattern):
         return True
     if '/' not in pattern and '/' in net_name:
@@ -87,7 +117,41 @@ def net_pattern_matches(net_name: str, pattern: str) -> bool:
     return False
 
 
-def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
+def short_net_names(pcb_data) -> Dict[str, str]:
+    """{net name: its short name} for every named net of the board: the name's
+    last path part -- the sheet path off -- where no other net's name ends in
+    that part, else the name whole. Two nets never share a short name: ENABLE
+    and TEST/ENABLE are each named in full, as /IO1/RESET and /MCU/RESET are,
+    while a /DDR3/SDQ5 alone of its kind is SDQ5. The ONE rule for a net named
+    short -- a log line, a plan's key, the whole route's lanes (awx
+    coherent_nets.net_keys)."""
+    from collections import Counter
+    names = [n.name for n in pcb_data.nets.values() if n.name]
+    last = Counter(n.split('/')[-1] for n in names)
+    return {n: n.split('/')[-1] if last[n.split('/')[-1]] == 1 else n for n in names}
+
+
+def literal_net_pattern(name: str) -> str:
+    """A net's name as a pattern that matches that name alone: a glob
+    character in it bracketed ('DATA[0]' -> 'DATA[[]0]'), so a name handed
+    on to a pattern channel (--power-nets, --nets) never reads as a glob."""
+    return re.sub(r'([*?\[])', r'[\1]', name)
+
+
+def board_net_names(pcb_data) -> Set[str]:
+    """Every net name on the board (its nets and its pads') -- the `net_names`
+    net_pattern_matches and matches_net_filter take, so a name selects the
+    net it is (named_net)."""
+    names = {n.name for n in pcb_data.nets.values() if n.name}
+    for pads in getattr(pcb_data, 'pads_by_net', {}).values():
+        for pad in pads:
+            if pad.net_name:
+                names.add(pad.net_name)
+                break
+    return names
+
+
+def matches_net_filter(net_name: str, patterns: List[str], net_names=None) -> bool:
     """
     Check if a net name matches a list of filter patterns.
 
@@ -112,6 +176,8 @@ def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
     Args:
         net_name: The net name to check
         patterns: List of patterns (may include wildcards and ! prefix for exclusion)
+        net_names: The board's net names (board_net_names), so a literal names
+            the net it is and not its namesakes on other sheets (named_net)
 
     Returns:
         True if the net should be included, False otherwise
@@ -126,13 +192,13 @@ def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
     # Check exclusion first: if net matches any exclude pattern, reject it
     if exclude_patterns:
         for pattern in exclude_patterns:
-            if net_pattern_matches(net_name, pattern):
+            if net_pattern_matches(net_name, pattern, net_names):
                 return False
 
     # Check inclusion: if there are include patterns, must match at least one
     if include_patterns:
         for pattern in include_patterns:
-            if net_pattern_matches(net_name, pattern):
+            if net_pattern_matches(net_name, pattern, net_names):
                 return True
         return False  # Has include patterns but didn't match any
 
@@ -1206,6 +1272,18 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                        if n.lstrip('/') == want or n.rsplit('/', 1)[-1] == want)
         return f" (did you mean {', '.join(repr(c) for c in close[:3])}?)" if close else ""
 
+    def _namesakes(pat: str, label: str) -> None:
+        """Say so when a literal names one net (named_net) that other nets end
+        in too: they are not taken, and a caller who meant them names them."""
+        one = named_net(pat, known_net_names)
+        if one is None or quiet:
+            return
+        others = sorted(n for n in known_net_names if n != one and n.rsplit('/', 1)[-1] == pat)
+        if others:
+            print(f"{label} names the net '{one}' alone; {len(others)} other net(s) end in "
+                  f"'{pat}': {', '.join(others[:5])}{' ...' if len(others) > 5 else ''} -- "
+                  f"name them to take them too")
+
     for raw_pattern in patterns:
         # Classify the pattern: exclusion ("!FOO"), escaped literal ("\!FOO"), or
         # plain include. A "!FOO" that verbatim names a real net is a literal
@@ -1222,11 +1300,13 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
         # Check for exclusion pattern (starts with !)
         # Both branches below resolve through net_pattern_matches, so the
         # unqualified spelling ('!GND') excludes the board's sheet-qualified
-        # '/GND' instead of silently matching nothing (#292/#493).
+        # '/GND' instead of silently matching nothing (#292/#493) -- and a
+        # literal that is a net's own name names that net alone (named_net).
         if is_exclude:
             exclude_pattern = pattern[1:]  # Remove the !
             matches = [name for name in all_net_names
-                       if net_pattern_matches(name, exclude_pattern)]
+                       if net_pattern_matches(name, exclude_pattern, known_net_names)]
+            _namesakes(exclude_pattern, f"Exclusion '!{exclude_pattern}'")
             is_wildcard = '*' in exclude_pattern or '?' in exclude_pattern
             if matches:
                 label = (f"Exclusion pattern '!{exclude_pattern}'" if is_wildcard
@@ -1235,12 +1315,11 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                     print(f"{label} matched {len(matches)} net(s): "
                           f"{', '.join(sorted(matches)[:5])}"
                           f"{' ...' if len(matches) > 5 else ''}")
-                # #513 item 19: the #292 trailing-path-component heuristic can
-                # sweep up a DISTINCT net that merely shares the leaf name --
-                # wrass_audio_card's '!GND' also excluded '/Expansion/GND' (a
-                # separate 2-pad net, never tied to main GND), which then
-                # silently got zero copper. Warn when an unqualified literal
-                # exclusion matched extra differently-qualified nets.
+                # #513 item 19: with no net of the literal's own name (named_net),
+                # the #292 trailing-path-component rule takes every sheet's net
+                # ending in it, and some may be DISTINCT nets that need copper
+                # (a sheet-local GND of two pads). Warn when an unqualified
+                # literal exclusion matched several differently-qualified nets.
                 if not is_wildcard:
                     _exact = {exclude_pattern, '/' + exclude_pattern.lstrip('/')}
                     _others = [m for m in matches if m not in _exact
@@ -1268,8 +1347,9 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                     seen.remove(name)
         else:
             matches = sorted([name for name in all_net_names
-                              if net_pattern_matches(name, pattern)
+                              if net_pattern_matches(name, pattern, known_net_names)
                               and name not in excluded])
+            _namesakes(pattern, f"'{pattern}'")
             if '*' in pattern or '?' in pattern:
                 if not matches:
                     print(f"Warning: Pattern '{pattern}' matched no nets")
@@ -1636,19 +1716,29 @@ def resolve_gnd_net_id(pcb_data: PCBData,
     """Resolve the board's ground net for GND return-via placement (issue #379).
 
     Returns ``(net_id, net_name)``, or ``(None, None)`` if no ground net is
-    found. Priority: an explicit ``preferred_name`` (e.g. ``--gnd-via-net``,
-    matched ignoring the sheet-path prefix) > an exact 'GND' > the GND family,
-    picking the shortest family name (then lowest net id) so a plain 'GND' beats
-    'GNDA'/'GNDD' deterministically. net 0 (unconnected) is never a ground net.
+    found. Priority: an explicit ``preferred_name`` (e.g. ``--gnd-via-net``: the
+    net of that name, else one ending in it, case ignored) > a 'GND' > the GND
+    family, picking the shortest family
+    name so a plain 'GND' beats 'GNDA'/'GNDD'. Among nets that end in one name
+    the board's own is taken -- the least deep sheet path, then the most pads
+    -- never a sheet's namesake by its net id: a sheet-local /Expansion/GND of
+    two pads is a separate net, not the board's ground. net 0 (unconnected) is
+    never a ground net.
     """
     nets = [(nid, net) for nid, net in pcb_data.nets.items()
             if nid != 0 and net.name]
+    _pbn = getattr(pcb_data, 'pads_by_net', None) or {}
+    npads = lambda nid: len(_pbn.get(nid, ()) or ())   # noqa: E731
+    rank = lambda kv: (kv[1].name.strip('/').count('/'), -npads(kv[0]), kv[1].name, kv[0])   # noqa: E731
     if preferred_name:
+        same = next(((nid, net.name) for nid, net in nets if net.name == preferred_name), None)
+        if same is not None:
+            return same                         # (the net of that name: named_net)
         want = _gnd_base(preferred_name)
-        for nid, net in nets:
-            if _gnd_base(net.name) == want:
-                return nid, net.name
-    exact = sorted((nid, net) for nid, net in nets if _gnd_base(net.name) == 'GND')
+        same = sorted(((nid, net) for nid, net in nets if _gnd_base(net.name) == want), key=rank)
+        if same:
+            return same[0][0], same[0][1].name
+    exact = sorted(((nid, net) for nid, net in nets if _gnd_base(net.name) == 'GND'), key=rank)
     if exact:
         return exact[0][0], exact[0][1].name
     fam = [(nid, net) for nid, net in nets if is_ground_net_name(net.name)]
@@ -1836,11 +1926,14 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     # so USB_D+/USB_D- pair (issue #181). Only for auto-names: user-named
     # hierarchical nets like '/bank1/CLK_N' must keep their full path so they
     # don't pair across banks. KiCad escapes '/' in net names as '{slash}', so
-    # split on either form.
+    # split on either form. The part's reference stays in front of the leaf
+    # ('U12-USB_D+'): the same pin names on a second chip (U13's USB_D+/USB_D-)
+    # are that chip's own pair, never one half of U12's.
     if is_auto_name:
         path = net_name.replace('{slash}', '/')
         if '/' in path:
-            net_name = path.rsplit('/', 1)[-1]
+            ref = path.split('-', 1)[0]
+            net_name = f"{ref}-{path.rsplit('/', 1)[-1]}"
 
     # NOTE (issue #192): the DDR true/complement (_t_/_c_) rules are checked LAST,
     # AFTER the explicit polarity-suffix rules below (+/-, _P/_N, P/N, USB,
@@ -1933,7 +2026,8 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     return None
 
 
-def matches_diff_pair_patterns(net_name: str, base_name: str, patterns: List[str]) -> bool:
+def matches_diff_pair_patterns(net_name: str, base_name: str, patterns: List[str],
+                               net_names=None, bases=None) -> bool:
     """
     Return True if any glob pattern selects this diff-pair half.
 
@@ -1943,11 +2037,28 @@ def matches_diff_pair_patterns(net_name: str, base_name: str, patterns: List[str
     base name (e.g. '/DVI_CK') select the whole pair, even for hierarchical
     (slash-separated) net names where '*_P' would otherwise miss the '_N'
     sibling and a leaf/base name would never equal the full path. (issue #120)
+
+    A LITERAL with no path that is a net's own name, or a pair's own base, on
+    the board -- `net_names` (board_net_names), `bases` (the pairs' bases) --
+    names that net's or that base's pair alone (named_net): 'CLK_P', a global
+    net, is not also /IO1/CLK_P's pair.
     """
-    candidates = (net_name, net_name.rsplit('/', 1)[-1],
-                  base_name, base_name.rsplit('/', 1)[-1])
-    return any(fnmatch.fnmatchcase(candidate, pattern)
-               for pattern in patterns for candidate in candidates)
+    for pattern in patterns:
+        one = named_net(pattern, net_names)
+        if one is not None:
+            if net_name == one:
+                return True
+            continue
+        one = named_net(pattern, bases)
+        if one is not None:
+            if base_name == one:
+                return True
+            continue
+        if any(fnmatch.fnmatchcase(candidate, pattern)
+               for candidate in (net_name, net_name.rsplit('/', 1)[-1],
+                                 base_name, base_name.rsplit('/', 1)[-1])):
+            return True
+    return False
 
 
 def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str, DiffPairNet]:
@@ -1972,6 +2083,7 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
 
     # Collect all diff-pair halves, regardless of pattern, so a pattern that
     # only catches one half can still pull in its sibling below.
+    halves = []
     for net_id, net in pcb_data.nets.items():
         net_name = net.name
         if not net_name or net_id == 0:
@@ -1994,8 +2106,13 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
         else:
             pairs[key].n_net_id = net_id
             pairs[key].n_net_name = net_name
+        halves.append((net_name, base_name, key))
 
-        if matches_diff_pair_patterns(net_name, base_name, patterns):
+    # (a literal naming a net or a pair's base names that one: named_net)
+    net_names = board_net_names(pcb_data)
+    bases = {k[0] for k in pairs}
+    for net_name, base_name, key in halves:
+        if matches_diff_pair_patterns(net_name, base_name, patterns, net_names, bases):
             matched_keys.add(key)
 
     # Filter to only complete pairs whose key was matched, keyed by base name
