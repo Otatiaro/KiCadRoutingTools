@@ -665,14 +665,17 @@ def build(n):
     # refused) and 0.450 where it blocks a pair to 0.456 (SDQS0 behind SDQ4's via)
     snap_('placed')
     ring_n = RING_PAIR if n in prs else RING
-    # ...and a single keeps its track off the cells the pair router TESTS a placed pair's dive at (the dive's centre and
-    # SPC cells either side across its heading), on both layers, as that test prices a line: a via's half, a track's
+    # ...and a lane keeps its track off the cells the pair router TESTS a placed pair's dive at (the dive's centre and
+    # SPC cells either side across its heading), on every layer, as that test prices a line: a via's half, a track's
     # half, the clearance and the pair's extra half pitch -- the barrels as drawn were kept clear and the router, which
-    # looks further out, refused the dive (K51 SDQS1: SDQ0's B line 0.400 from a tested cell where it asks 0.427)
-    if n not in prs:
-        for (m, tx_, ty_) in PDIVE:
-            for L in bad:
-                mark(bad[L], (tx_, ty_, tx_, ty_), VR + TW / 2 + CL + HALF + g / 2, pt_d(tx_, ty_))
+    # looks further out, refused the dive (K51 SDQS1: SDQ0's B line 0.400 from a tested cell where it asks 0.427). A
+    # pair by its legs, its own half pitch off its centreline: a pair laid after another's dive left its leg 0.485 from
+    # a tested cell where the router asks 0.535, and the dive was refused
+    for (m, tx_, ty_) in PDIVE:
+        if m == n:
+            continue
+        for L in bad:
+            mark(bad[L], (tx_, ty_, tx_, ty_), VR + TW / 2 + CL + HALF + hw[n] + g / 2 * (1 + OFFG[n]), pt_d(tx_, ty_))
     for (m, bx_, by_) in PVIAS:
         rx, ry = round(bx_ / g) * g, round(by_ / g) * g
         for L in bad:
@@ -716,9 +719,10 @@ def build(n):
         for (m, bx_, by_) in PVIAS:
             mark(vb, (bx_, by_, bx_, by_), VVB + g / 2 * (OFFG[n] + (0 if (m, bx_, by_) in EXACT else OFFG[m])),
                  pt_d(bx_, by_), ox, oy)
-        # ...and a single's via off the cells the pair router tests a placed pair's dive at, as it prices a via there
-        if n not in prs:
-            for (m, tx_, ty_) in PDIVE:
+        # ...and a via off the cells the pair router tests a placed pair's dive at, as it prices a via there (a pair's
+        # barrels too)
+        for (m, tx_, ty_) in PDIVE:
+            if m != n:
                 mark(vb, (tx_, ty_, tx_, ty_), 2 * VR + CL + g / 2, pt_d(tx_, ty_), ox, oy)
         for m in unplaced:
             Pm = LANE[m]['pts']
