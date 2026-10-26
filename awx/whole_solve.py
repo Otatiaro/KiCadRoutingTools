@@ -2124,7 +2124,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
 
         def _first(model_, batches_, first_=True, one_=False):
             """a plan of `model_` in `batches_`: its first, the objective set aside (`first_`), else its best; on ONE
-            worker (`one_`) where several would race to it"""
+            worker (`one_`) where several would race to it. On several, the search is not stopped the moment one of
+            them reports a plan -- which one did was a race, (1)'s plan differing in one of six runs of a bus and every
+            step after it with it -- but at the end of the batch it found one in: the same plan every run, the rest of
+            that batch its price (8 to 14 s on a bus of 40 lanes)"""
             if first_:
                 model_.ClearObjective()
             sf_ = cp_model.CpSolver()
@@ -2133,7 +2136,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             sf_.parameters.max_num_deterministic_batches = batches_
             sf_.parameters.share_glue_clauses = False
             sf_.parameters.share_binary_clauses = False
-            sf_.parameters.stop_after_first_solution = first_
+            sf_.parameters.stop_after_first_solution = first_ and one_
             return sf_, sf_.Solve(model_)
         t1_ = time.time()
         m1_ = m.clone()
