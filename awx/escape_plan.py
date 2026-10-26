@@ -859,6 +859,14 @@ def run(out_path, K, base, log=print):
             # (the round as first laid stands: its copper is the board's to grade, the bus step's to put back)
             log(f'  joint field of {sref}: round the held parts the bus\'s ends are not left for {got[3]} -- the '
                 f'round as first laid')
+    att_ = [tuple(h.split('.', 1)) + ('',) for h in (awx_settings.get('BUS_ATTACHED') or '').split(',') if h]
+    if ok and joint_laid and att_:
+        # (the pulls the bus step joined to their lanes beside the source, route_bus.attach_pulls: the joint field took
+        # their stubs off with the array's bus copper -- joined again from the net's via on the field, clear of the
+        # round's copper, after the cap nudge. Else the pull stood open beside its lane every round, and its lane was
+        # put back as it came)
+        import route_bus as rb_
+        rb_.attach_pulls(out_path, att_, [sref], log)
     sidecar(out_path, st, [n for n in names if n in st['launch']], teeth, berths, cut, read)
     by_face = collections.Counter((m.direction, m.layer) for _n, m in moves)
     log(f'  ends by face and layer: {dict(sorted(by_face.items()))}; sidesteps '
