@@ -1714,6 +1714,27 @@ chooses again, **incrementally**: from the previous round's source board,
 only the teeth the feedback names free, every other berth held, the run's
 nets the previous round's.
 
+**Crowded ends repaired in the round** (`repair_ends`): before a loop that
+stopped at crowded ends hands them on, the round mends what one lane's copper
+can, on its own fanout bench, and runs the loop again from its solve. Each
+STATIC finding the stop named is read off the stopping round's audit, the
+copper it names found there:
+
+- another net's unlocked via (a plane ball's drop), at either end: moved off
+  the lane (`ends_nudge.py --via-at`);
+- a bus lane's own unlocked via or stub track, at the teeth: nudged clear,
+  0.25 mm at most (another net's via, 0.5 mm) (`ends_nudge.py`);
+- anything else right past a tooth -- another net's track or pad, a locked
+  via: the lane's ball escaped again (`ends_reescape.py`), on the same face
+  within a millimetre of the old tooth, where the solve's order still holds.
+
+Every move is checked on the fanout's own obstacle model and the moves chain.
+A pair's own end and a finding at the berths that is not another net's via
+wait for the next round. On DDR and two-end buses on four and eight layers, a
+round that had stopped crowded passed in that round with fewer vias, and two
+lanes that a tooth against an earlier bus's locked track had left open
+closed.
+
 <details>
 <summary>Details</summary>
 
@@ -2060,6 +2081,7 @@ With nothing supplied, as on the benches:
 | `joint_escape.py`, `conflict_groups.py` | the joint fanout (`route_bus --joint-fanout`): an array's other balls planned together in one CP-SAT solve and laid by the under-pad engine's joint escape (a drop at a finer rung's via: `tests/test_622_drop_fine_via.py`; nothing in a laid pair's pocket: `test_622_pair_teeth.py`; no escape between two laid lanes that close round it: `test_622_lane_walls.py`); the escapes' conflicts as cliques and bicliques (`tests/test_622_conflict_groups.py`); a shared array planned whole round an escape bus's teeth (`route_bus --escape`, `ESCAPE_JOINT`: `escape_field`); a later round's pieces carried onto its board once (`carry`: `tests/test_622_joint_rounds.py`) |
 | `whole_route.py`, `modal_whole.py` | one rung end to end -- fanout, solve, loop, route, checks, feedback rounds -- graded in one line (`WHOLE K=..`); the loop's layer cuts from the audit and the snap (`tests/test_622_layer_cuts.py`); a lane its fanout gave no end, or ran and did not lay, left out of the round, open (`with_ends`: `tests/test_622_whole_route_no_ends.py`); the ladder in the cloud, one container per rung |
 | `whole_ends.py`, `ends_kernel.py`, `whole_frame.py`, `whole_feedback.py` | the choice of ends (the fanout's `PLAN_JUDGE=ends`; every plane ball kept a way down: `tests/test_622_walled_balls.py`; its estimate scored in Rust, `ENDS_KERNEL=check` both ways); the frame of a bench (a part on a ring's stack: `tests/test_622_ring_room.py`); what goes back to the fanout (`tests/test_622_ends_fixes.py`, `test_622_exit_front.py`, `test_622_feedback_rounds.py`; an item for a lane the round's ends have no option for keys nothing: `fb_tables`) |
+| `ends_nudge.py`, `ends_reescape.py` | a crowded end repaired on the round's fanout bench (`whole_route.repair_ends`): a lane's via or tooth, or another net's via, nudged the smallest step clear of a finding; a ball escaped again from its menu, its first stretch clear of every other net's copper, laid alone by `source_realize.realize` |
 | `whole_solve.py`, `whole_geo.py`, `whole_polish.py`, `whole_snap.py` | the crossing and layer solve, the geometry LP (a part seen from several frames: `tests/test_622_part_frames.py`; islands made of pads: `tests/test_622_pad_islands.py`), the polish, the snap onto the router's grid |
 | `whole_audit.py`, `whole_gate.py`, `whole_lint.py`, `whole_render.py`, `whole_ctx.py` | a plan installed and audited, gated, linted, drawn; the bench they share, read as the ends model reads it (`tests/test_622_candidate_ctx.py`: an all-pair bus's plan sidecar read by the pairs' legs) |
 | `whole_ladder.py` | the ladders on this machine: rungs side by side, each stopped at a cap with every stage it started, one grade line each |
