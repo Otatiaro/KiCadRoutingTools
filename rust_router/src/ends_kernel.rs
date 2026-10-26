@@ -1,6 +1,6 @@
-//! The whole route's ENDS ESTIMATE (awx/whole_ends.py: Ends._score -> _score_at -> _score_nl, more routing layers
-//! than two, one destination) scored from tables awx/ends_kernel.py builds once a model: each option's point, layer,
-//! layer domain, legs, conflict keys and hands; the ride of each tooth and berth together (and its wound turns and
+//! The whole route's ENDS ESTIMATE (awx/whole_ends.py: Ends._score -> _score_at, its two-layer route or _score_nl
+//! on more routing layers, one destination) scored from tables awx/ends_kernel.py builds once a model: each option's
+//! point, layer, layer domain, legs, conflict keys and hands; the ride of each tooth and berth together (and its wound turns and
 //! far-face ride); each pair of options' stacks and runs met; the plane ways each option kills; the feedback's tables.
 //! The ends search scores some 400 000 states a choice -- half a millisecond each in Python.
 //!
@@ -639,6 +639,15 @@ impl EndsKernel {
                 to(l).legs.iter().zip(bo(l).legs.iter()).map(|(t, b)| t.2 + b.2).max().unwrap_or(0)
             })
             .collect();
+        if self.nl == 2 {
+            // two routing layers (Ends._score_at's own route: the cover, the settling, the coupling)
+            let (chg, xo) = self.route_two(st, &kp, &kd, &inv, &sv);
+            let opp = vec![false; nl_];
+            return self.tail(
+                st, fan, nconf, nref, nsplit, &kd, &inv, sv, chg, &opp, &xo, cut, &sb, &db, scut, &far_l, wound_on,
+                terms, false,
+            );
+        }
         self.score_nl(st, fan, nconf, nref, nsplit, &kd, &inv, &sv, cut, &sb, &db, scut, &far_l, wound_on, terms)
     }
 
@@ -790,6 +799,246 @@ impl EndsKernel {
         }
         fan -= dsum;
         let svd: Vec<i64> = (0..nl_).map(|l| (sv[l] - drp[l]).max(0)).collect();
+        self.tail(
+            st, fan, nconf, nref, nsplit, kd, inv, svd, chg, &opp, &xo, cut, sb, db, scut, far_l, wound_on, terms, true,
+        )
+    }
+
+    /// the objective from a route's changes (`chg`; `svd` each lane's stub vias, its drops off): the nets over two, the
+    /// trunk's crossings and load, the rides, the stacks, the feedback and fronts, the crossings LEARNED (`learned`:
+    /// more routing layers than two, as the Python prices them only there), the walled balls, the far teeth and fences
+    /// the route on TWO routing layers (Ends._score_at's own): each lane's changes -- one for ends on two layers, two
+    /// for an opposite-hands pair on one layer end to end, two for a lane of each layer's COVER (the least-weight
+    /// lanes whose dives leave the rest of that layer uncrossed: the complement of its heaviest chain rising in both
+    /// orders); then each lane whose ends differ SETTLES the partners its one change cannot serve (an excursion, or
+    /// the fewest of them dive: a minimum cut); then the lanes whose settling shares a choice COUPLE (each conflict
+    /// resolved by its cheapest lane). Returns (changes, crossover changes) a lane
+    fn route_two(
+        &self,
+        st: &[(usize, usize)],
+        kp: &[(f64, usize)],
+        kd: &[(f64, usize)],
+        inv: &[(usize, usize)],
+        sv: &[i64],
+    ) -> (Vec<i64>, Vec<i64>) {
+        let n = self.nlanes;
+        let to = |l: usize| &self.opts[0][l][st[l].0];
+        let bo = |l: usize| &self.opts[1][l][st[l].1];
+        let tl: Vec<i32> = (0..n).map(|l| to(l).lid).collect();
+        let dl: Vec<i32> = (0..n).map(|l| bo(l).lid).collect();
+        // ('B.Cu' if a layer is 'F.Cu' else 'F.Cu', against an end's layer: as routing-layer indices, F.Cu 0, B.Cu 1;
+        // an end off both is neither)
+        let town: Vec<i32> = (0..n).map(|l| to(l).own).collect();
+        let down: Vec<i32> = (0..n).map(|l| bo(l).own).collect();
+        let flat: Vec<bool> = (0..n).map(|l| tl[l] == dl[l]).collect();
+        let mut xo: Vec<i64> = vec![0; n];
+        for l in 0..n {
+            if self.npair[l] == 2 && flat[l] {
+                let (a_, b_) = (to(l).hand, bo(l).hand);
+                xo[l] = if a_ != 0 && b_ != 0 && a_ != b_ { 2 } else { 0 };
+            }
+        }
+        let wo = self.w_over;
+        let base: Vec<i64> = (0..n).map(|l| sv[l] + if flat[l] { 0 } else { 1 } + xo[l]).collect();
+        let ov = |l: usize, k: i64| -> i64 { (base[l] + k - self.via_pref).max(0) };
+        let w: Vec<f64> = (0..n).map(|l| (2 * self.npair[l]) as f64 + wo * (ov(l, 2) - ov(l, 0)) as f64).collect();
+        // the cover (Ends._cover): per layer, the lanes on it end to end in launch order, the heaviest chain rising in
+        // the berth order too kept, the rest covered
+        let mut in_cov = vec![false; n];
+        let mut layers: Vec<i32> = (0..n).filter(|&l| flat[l] && xo[l] == 0).map(|l| tl[l]).collect();
+        layers.sort();
+        layers.dedup();
+        for &lay in &layers {
+            let mut ls: Vec<usize> = (0..n).filter(|&l| flat[l] && xo[l] == 0 && tl[l] == lay).collect();
+            ls.sort_by(|&a, &b| if lt(kp[a], kp[b]) { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater });
+            let mut best: Vec<f64> = vec![0.0; ls.len()];
+            let mut prev: Vec<Option<usize>> = vec![None; ls.len()];
+            for i in 0..ls.len() {
+                let a = ls[i];
+                best[i] = w[a];
+                for j in 0..i {
+                    let b = ls[j];
+                    if lt(kd[b], kd[a]) && best[j] + w[a] > best[i] {
+                        best[i] = best[j] + w[a];
+                        prev[i] = Some(j);
+                    }
+                }
+            }
+            if ls.is_empty() {
+                continue;
+            }
+            // (max by (best, -index in the run): the heaviest, the earliest lane on a tie)
+            let mut x = 0;
+            for i in 1..ls.len() {
+                if best[i] > best[x] || (best[i] == best[x] && kp[ls[i]].1 < kp[ls[x]].1) {
+                    x = i;
+                }
+            }
+            let mut chain = vec![false; ls.len()];
+            let mut cur = Some(x);
+            while let Some(i) = cur {
+                chain[i] = true;
+                cur = prev[i];
+            }
+            for i in 0..ls.len() {
+                if !chain[i] {
+                    in_cov[ls[i]] = true;
+                }
+            }
+        }
+        let mut chg: Vec<i64> =
+            (0..n).map(|l| (if flat[l] { 0 } else { 1 }) + xo[l] + if in_cov[l] { 2 } else { 0 }).collect();
+        // the settling
+        let rank = |key: &[(f64, usize)]| -> Vec<i64> {
+            let mut o: Vec<usize> = (0..n).collect();
+            o.sort_by(|&a, &b| if lt(key[a], key[b]) { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater });
+            let mut r = vec![0i64; n];
+            for (i, &l) in o.iter().enumerate() {
+                r[l] = i as i64;
+            }
+            r
+        };
+        let rl = rank(kp);
+        let rf = rank(kd);
+        let mut xs: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut cset: FxHashSet<(usize, usize)> = FxHashSet::default();
+        for &(a, b) in inv {
+            xs[a].push(b);
+            xs[b].push(a);
+            cset.insert((a.min(b), a.max(b)));
+        }
+        let crossed = |a: usize, b: usize| cset.contains(&(a.min(b), a.max(b)));
+        let tcr = |p: usize, m: usize| -> f64 {
+            ((rl[m] - rl[p]) as f64) / (((rl[m] - rl[p]) - (rf[m] - rf[p])) as f64)
+        };
+        let ovk = |l: usize, k: i64| -> i64 { (sv[l] + k - self.via_pref).max(0) };
+        let mut sn: Vec<usize> = (0..n).filter(|&l| !flat[l]).collect();
+        sn.sort_by_key(|&l| rl[l]);
+        for &p in &sn {
+            let mut part: Vec<usize> = xs[p].clone();
+            part.sort_by(|&a, &b| tcr(p, a).partial_cmp(&tcr(p, b)).unwrap());
+            let ps: Vec<(usize, i32)> = part
+                .into_iter()
+                .filter(|&m| flat[m] && chg[m] == 0)
+                .map(|m| (m, if town[m] == 0 { 1 } else { 0 }))
+                .collect();
+            let mut bad: Vec<(usize, usize)> = Vec::new();
+            for i in 0..ps.len() {
+                for j in i + 1..ps.len() {
+                    let ((a, na), (b, nb)) = (ps[i], ps[j]);
+                    if na == down[p] && nb == town[p] && !crossed(a, b) {
+                        bad.push((a, b));
+                    }
+                }
+            }
+            if bad.is_empty() {
+                continue;
+            }
+            let wt = |m: usize| wo * (ovk(m, 2) - ovk(m, 0)) as f64 + (2 * self.npair[m]) as f64;
+            let div = min_cut_cover(&bad, &wt);
+            let mut dsum: f64 = 0.0;
+            for &m in &div {
+                dsum += wt(m);
+            }
+            if wo * (ovk(p, chg[p] + 2) - ovk(p, chg[p])) as f64 + (2 * self.npair[p]) as f64 <= dsum {
+                chg[p] += 2;
+            } else {
+                for &m in &div {
+                    chg[m] = 2;
+                }
+            }
+        }
+        // the coupling
+        let tie = |x: usize, y: usize| (kp[x].0 - kp[y].0).abs() < 1e-3 || (kd[x].0 - kd[y].0).abs() < 1e-3;
+        let mut conflicts: Vec<[usize; 4]> = Vec::new();
+        for &(a, b) in inv {
+            if !(flat[a] && flat[b] && chg[a] == 0 && chg[b] == 0 && tl[a] != tl[b]) || tie(a, b) {
+                continue;
+            }
+            // (the lanes crossing both, in the run's order -- the Python sorts the set's members so)
+            let mut ns: Vec<usize> = xs[a]
+                .iter()
+                .cloned()
+                .filter(|&m| xs[b].contains(&m) && !flat[m] && chg[m] == 1 && !tie(m, a) && !tie(m, b))
+                .collect();
+            ns.sort();
+            ns.dedup();
+            if ns.len() < 2 {
+                continue;
+            }
+            let want = |m: usize| -> bool {
+                let first = if tl[m] != tl[a] { a } else { b };
+                let pre = if (rl[a] - rl[m]) * (rl[b] - rl[m]) > 0 {
+                    if (rl[a] - rl[m]).abs() < (rl[b] - rl[m]).abs() {
+                        a
+                    } else {
+                        b
+                    }
+                } else {
+                    a
+                };
+                first == pre
+            };
+            ns.sort_by(|&x, &y| tcr(a, x).partial_cmp(&tcr(a, y)).unwrap());
+            for i in 0..ns.len() {
+                for j in i + 1..ns.len() {
+                    let (n1, n2) = (ns[i], ns[j]);
+                    if !crossed(n1, n2) && !tie(n1, n2) && !want(n1) && want(n2) {
+                        conflicts.push([a, b, n1, n2]);
+                    }
+                }
+            }
+        }
+        while !conflicts.is_empty() {
+            let fix_cost = |x: usize| -> f64 {
+                if !flat[x] {
+                    wo * (ovk(x, chg[x] + 2) - ovk(x, chg[x])) as f64 + (2 * self.npair[x]) as f64
+                } else {
+                    wo * (ovk(x, 2) - ovk(x, 0)) as f64 + (2 * self.npair[x]) as f64
+                }
+            };
+            let mut cand: Vec<usize> = conflicts.iter().flat_map(|c| c.iter().cloned()).collect();
+            cand.sort();
+            cand.dedup();
+            let mut pick: Option<(f64, usize)> = None;
+            for &x in &cand {
+                let cnt = conflicts.iter().filter(|c| c.contains(&x)).count();
+                let v = fix_cost(x) / cnt as f64;
+                if pick.is_none() || v < pick.unwrap().0 {
+                    pick = Some((v, x));
+                }
+            }
+            let x = pick.unwrap().1;
+            chg[x] = if !flat[x] { chg[x] + 2 } else { 2 };
+            conflicts.retain(|c| !c.contains(&x));
+        }
+        (chg, xo)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tail(
+        &self,
+        st: &[(usize, usize)],
+        fan: i64,
+        nconf: i64,
+        nref: i64,
+        nsplit: i64,
+        kd: &[(f64, usize)],
+        inv: &[(usize, usize)],
+        svd: Vec<i64>,
+        chg: Vec<i64>,
+        opp: &[bool],
+        xo: &[i64],
+        cut: Cut,
+        sb: &[f64; 4],
+        db: &[f64; 4],
+        scut: Option<f64>,
+        far_l: &[usize],
+        wound_on: bool,
+        terms: Option<&mut Terms>,
+        learned: bool,
+    ) -> f64 {
+        let nl_ = self.nlanes;
         let ovk = |l: usize, k: i64| -> i64 { (svd[l] + k - self.via_pref).max(0) };
         let mut route: i64 = 0;
         let mut over: i64 = 0;
@@ -949,14 +1198,14 @@ impl EndsKernel {
         let front = fs.get();
         // crossings the whole solve could not place, learned
         let mut xlearn: f64 = 0.0;
-        if self.has_x {
+        if learned && self.has_x {
             let mut s = PySum::new(self.neumaier);
             for &(a, b) in inv {
                 s.add(*self.x_learned.get(&(a as u32, b as u32)).unwrap_or(&0.0));
             }
             xlearn = s.get();
         }
-        if self.has_opp {
+        if learned && self.has_opp {
             let mut s = PySum::new(self.neumaier);
             for l in 0..nl_ {
                 if opp[l] {
@@ -965,7 +1214,7 @@ impl EndsKernel {
             }
             xlearn += s.get();
         }
-        if self.opp_dive != 0.0 {
+        if learned && self.opp_dive != 0.0 {
             let n = (0..nl_).filter(|&l| opp[l] && xo[l] == 0).count();
             xlearn += self.opp_dive * n as f64;
         }
@@ -1022,7 +1271,9 @@ impl EndsKernel {
         obj += self.stack_cost * stacks as f64;
         obj += front;
         obj += self.walled_w * nwalled as f64;
-        obj += xlearn;
+        if learned {
+            obj += xlearn;
+        }
         obj += self.corner * 0.0;
         obj += self.far_tooth * nfar as f64;
         obj += fence;
@@ -1033,6 +1284,70 @@ impl EndsKernel {
             ];
         }
         obj
+    }
+}
+
+/// whole_ends.min_cut_cover: the least-weight vertex cover of the bipartite `edges` [(left, right)] (weights `wt`) --
+/// a minimum s-t cut, the left lanes the source cannot reach in the residual graph and the right ones it can (that
+/// set is the same for every maximum flow, so the augmenting order is free)
+fn min_cut_cover(edges: &[(usize, usize)], wt: &dyn Fn(usize) -> f64) -> Vec<usize> {
+    let mut left: Vec<usize> = edges.iter().map(|e| e.0).collect();
+    let mut right: Vec<usize> = edges.iter().map(|e| e.1).collect();
+    left.sort();
+    left.dedup();
+    right.sort();
+    right.dedup();
+    // nodes: 0 the source, 1 the sink, then the left lanes, then the right ones
+    let nn = 2 + left.len() + right.len();
+    let li = |a: usize| 2 + left.binary_search(&a).unwrap();
+    let ri = |b: usize| 2 + left.len() + right.binary_search(&b).unwrap();
+    let mut cap = vec![vec![0.0f64; nn]; nn];
+    for &a in &left {
+        cap[0][li(a)] += wt(a);
+    }
+    for &b in &right {
+        cap[ri(b)][1] += wt(b);
+    }
+    for &(a, b) in edges {
+        cap[li(a)][ri(b)] = f64::INFINITY;
+    }
+    loop {
+        let mut prev: Vec<Option<usize>> = vec![None; nn];
+        let mut seen = vec![false; nn];
+        seen[0] = true;
+        let mut q = std::collections::VecDeque::new();
+        q.push_back(0);
+        while let Some(u) = q.pop_front() {
+            if seen[1] {
+                break;
+            }
+            for v in 0..nn {
+                if !seen[v] && cap[u][v] > 1e-12 {
+                    seen[v] = true;
+                    prev[v] = Some(u);
+                    q.push_back(v);
+                }
+            }
+        }
+        if !seen[1] {
+            let mut out: Vec<usize> = left.iter().cloned().filter(|&a| !seen[li(a)]).collect();
+            out.extend(right.iter().cloned().filter(|&b| seen[ri(b)]));
+            return out;
+        }
+        let mut f = f64::INFINITY;
+        let mut v = 1;
+        while let Some(u) = prev[v] {
+            if cap[u][v] < f {
+                f = cap[u][v];
+            }
+            v = u;
+        }
+        let mut v = 1;
+        while let Some(u) = prev[v] {
+            cap[u][v] -= f;
+            cap[v][u] += f;
+            v = u;
+        }
     }
 }
 

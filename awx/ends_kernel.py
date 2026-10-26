@@ -1,4 +1,4 @@
-"""ends_kernel -- the ends model's estimate (whole_ends.Ends._score: more routing layers than two, one destination)
+"""ends_kernel -- the ends model's estimate (whole_ends.Ends._score: two routing layers or more, one destination)
 scored in Rust (grid_router.EndsKernel). The ends search scores some 400 000 states a choice -- zynq7020_som's first,
 200 of its 240 CPU seconds at half a millisecond each in Python, its four threads taking turns at the GIL.
 
@@ -11,8 +11,8 @@ same doubles.
 
 ENDS_KERNEL: '1' (default) the kernel where it reaches -- Ends.objective, the search's question; the parts of a state
 kept (Ends.score) are still the Python's -- '0' the Python alone, 'check' both on every state, a difference raised
-with the two sets of terms. It does not reach two routing layers, a branched bus, the risk price (ENDS_CORNER), or
-the exact route: the Python scores those."""
+with the two sets of terms. On two routing layers it scores _score_at's own route (the cover, the settling, the
+coupling); it does not reach a branched bus, the risk price (ENDS_CORNER) or the exact route: the Python scores those."""
 import collections
 import math
 import os
@@ -34,7 +34,7 @@ TERMS = ('objective', 'fan', 'route', 'over', 'ride', 'cong', 'feedback', 'cross
 
 def reaches(E):
     import whole_ends as we
-    return _EndsKernel is not None and MODE != '0' and E.NL > 2 and not E.multi and not we.CORNER_ON
+    return _EndsKernel is not None and MODE != '0' and E.NL >= 2 and not E.multi and not we.CORNER_ON
 
 
 class Handle:
@@ -103,7 +103,10 @@ def build(E):
                if L_ == (layer if layer is not None else m.layer) for p in (a, b)]
         return (min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)) \
             if pts else None
-    for k, opts in ((0, E.T), (1, E.B)):
+    two = E.NL == 2       # (two routing layers: _score_at's own route reads no layer domain and no runs met)
+    if two:
+        assert E.RL[:2] == ['F.Cu', 'B.Cu'], E.RL      # (the kernel reads an end's layer as F.Cu 0, B.Cu 1)
+    for k, opts in ((0, E.T), (1, E.B)) if not two else ():
         for la, lga in E.lanes:
             for ia, oa in enumerate(opts[la]):
                 fa, _na, oka = E.end_domain(oa, k, lga)
@@ -164,7 +167,7 @@ def build(E):
         for la, lg in E.lanes:
             lane_rows = []
             for i, o in enumerate(opts[la]):
-                f_, n_, ok_ = E.end_domain(o, k, lg)
+                f_, n_, ok_ = E.end_domain(o, k, lg) if not two else (0, None, None)
                 hand = 0
                 if len(lg) == 2:
                     (p_, q_) = o[0]

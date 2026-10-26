@@ -1016,7 +1016,9 @@ class Ends:
         for a, b in inv:
             if not (flat[a] and flat[b] and chg[a] == 0 and chg[b] == 0 and tl[a] != tl[b]) or tie(a, b):
                 continue
-            ns = [n for n in set(xs[a]) & set(xs[b]) if not flat[n] and chg[n] == 1
+            # (in the run's order, then by their crossing with a below: a set's own order is its hash seed's, and
+            # two lanes that meet a at one time kept it -- ends_kernel's Rust takes the same order)
+            ns = [n for n in sorted(set(xs[a]) & set(xs[b]), key=lambda n: idx[n]) if not flat[n] and chg[n] == 1
                   and not tie(n, a) and not tie(n, b)]
             if len(ns) < 2:
                 continue

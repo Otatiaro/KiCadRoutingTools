@@ -452,6 +452,15 @@ src/
 
 ## Version History
 
+### 0.24.1 (2026-10-25)
+
+- **`EndsKernel` on two routing layers**: the ends estimate's own two-layer
+  route (`Ends._score_at`: each layer's cover, the settling of lanes whose
+  ends differ by a minimum cut, the coupling of shared settlings) scored in
+  the kernel, from the same tables, the same doubles; the learned crossings
+  stay unpriced there, as in the Python. The ends search on two layers runs
+  in the kernel too.
+
 ### 0.24.0 (2026-10-20)
 
 - **`EndsKernel`**: the whole route's ENDS ESTIMATE (`awx/whole_ends.py`,

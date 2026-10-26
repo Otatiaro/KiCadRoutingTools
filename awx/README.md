@@ -1033,8 +1033,8 @@ fanouts tried lost, each after up to seven exact routes, then run to the
 work limit. With one each, that bus's first winding took 151 s for 436, and
 the two-end bus's cuts and their outcomes are the same, round for round.
 
-**Scored in Rust** (`ends_kernel.py`, `grid_router.EndsKernel`). On more
-routing layers than two the model's estimate -- the objective its searches
+**Scored in Rust** (`ends_kernel.py`, `grid_router.EndsKernel`). On any
+number of routing layers the model's estimate -- the objective its searches
 ask of some 400,000 states a choice -- and the local search's loop run in the
 router's Rust core, on tables read off the model once; the Python keeps the
 exact route and the parts of a kept state. The kernel forms the same doubles
@@ -1043,8 +1043,14 @@ kernel's is too there), so the searches walk the same states and keep the same
 ends. In Python the searches' threads took turns at the GIL: zynq7020_som's
 first choice took 200 s, and takes 6. `ENDS_KERNEL=0` scores in Python alone,
 `check` both on every state, a difference raised with the two sets of terms.
-Two routing layers, a branched bus and the risk price (`ENDS_CORNER`) are
-scored in Python.
+On two routing layers it scores the estimate's own two-layer route -- each
+layer's cover, the settling by a minimum cut, the coupling -- and every rung
+of both ladders lays the same board as the Python, its fanout 9 to 19 times
+sooner: H3 K51's 43 s where it took 488, zynq K43's 55 s where it took 518,
+the zynq board's own DDR3 bus step's 121 s where it took 821 (H3 K15:
+158,211 states checked equal); the coupling takes the lanes crossing a pair in the run's
+order before it sorts them, where a set's order was its hash seed's. A
+branched bus and the risk price (`ENDS_CORNER`) are scored in Python.
 
 **Laid as asked, or not kept.** The destination is chosen, fanned out and
 audited in passes (`DST_ITERS`, 8):
