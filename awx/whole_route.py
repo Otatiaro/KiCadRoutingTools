@@ -1373,7 +1373,8 @@ def chain(K, o, R=3, base=None, dest=None, settings=None):
         say(f"  all at once: {sm}")
         if not os.path.isfile(seq):
             return None
-        pats = [f'*{n}' for n in nets_all]
+        from coherent_nets import net_patterns
+        pats = net_patterns(nets_all)
         # (the checkers by the path the shell gives them, from awx/: their logs echo it; always in a process of
         # their own: they are the harness's grade, not the route, and a checker run as a script installs its
         # command-line banner -- the CMD / EXIT echo -- for its whole process)

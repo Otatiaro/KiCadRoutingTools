@@ -1606,7 +1606,12 @@ if PAIRS_ONLY:
             res['lanes'][n] = {'xy': plan['lanes'][n]['xy'], 'pieces': plan['lanes'][n]['pieces'],
                                'vias': [list(v) for v in LANE[n]['vias']]}
     res['held'] = sorted(n for n in res['lanes'] if n in prs)
-    for k_ in ('flips', 'cuts', 'vcuts', 'paid'):
+    # (and the geometry's islands, their boxes and the solve's changes, which the polish that fits the singles round the
+    # held pairs reads: it names a clash by its island -- a two-pad part split across the lanes as REF:1 and REF:2, the
+    # names the next geometry's flips are matched by -- answers an island not on every layer with a layer cut, pushes a
+    # lane out of the whole island, and places its via cuts by the changes. Without them it named the part, a flip
+    # that matched nothing yet counted as new; sent a flip for a layer cut; and pushed the lane out of one pad)
+    for k_ in ('flips', 'cuts', 'vcuts', 'paid', 'islands', 'island_boxes', 'changes'):
         if k_ in plan:
             res[k_] = plan[k_]
 res['opposite'] = sorted(n for n in M if n in prs and is_crossed(n))     # the lint holds each to its crossover

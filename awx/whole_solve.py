@@ -456,8 +456,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                     spans_.append((max(lo_s, entry[n_]), min(hi_s, end[n_])))
             elif not (max(ss_) < entry[n_] or min(ss_) > tend[n_]):
                 spans_.append((min(ss_), max(ss_)))              # (on the lane's trunk)
-            if NL > 2 and n_ in bname and not c_.get('span'):
-                # (...and on its ring, past its handoff: the island's span along the ring's spine, in the lane's u)
+            if n_ in bname and not c_.get('span'):
+                # (...and on its ring, past its handoff: the island's span along the ring's spine, in the lane's u -- on
+                # two layers too, where no cut carries a span: the trunk's projection stops at the handoff, and an
+                # island past it gave the lane no cut there, or one on a stretch of its trunk)
                 us_ = [u_ring(n_, float(ring_of[bname[n_]].project_pt(q_)[0])) for q_ in cnr_]
                 if max(us_) > Hn[n_] and min(us_) < end[n_]:
                     spans_.append((max(min(us_), Hn[n_]), max(us_)))

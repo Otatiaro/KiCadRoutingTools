@@ -44,7 +44,7 @@ import escape_moves as em  # noqa: E402
 import detect_buses as db  # noqa: E402
 import plan_ends as pe  # noqa: E402
 import source_realize as sr  # noqa: E402
-from coherent_nets import coherent_nets  # noqa: E402
+from coherent_nets import coherent_nets, net_patterns  # noqa: E402
 import rules as _rules  # noqa: E402  ONE source for every design rule
 import route_layers  # noqa: E402  the routing layers: the escapes' runs may take any of them
 
@@ -2426,7 +2426,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
                         # zynq's NetC146_2 endpoint gap, an earlier step's),
                         # which no fanout of the run's nets made or can mend,
                         # and read whole it failed every fanout of the run
-                        '--nets'] + [f'*{nm}' for nm in names],
+                        '--nets'] + net_patterns(names),
                        capture_output=True, text=True, env=awx_settings.environ())
     _drc_txt = r.stdout + r.stderr
     clean = 'NO DRC VIOLATIONS' in _drc_txt

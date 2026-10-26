@@ -136,7 +136,8 @@ def grade(out, board, bench, nets, own_pro=False, others=True):
     pro = os.path.splitext(board)[0] + '.kicad_pro'
     if not own_pro and os.path.abspath(pro) != os.path.abspath(os.path.join(out, 'in.kicad_pro')):
         shutil.copy(os.path.join(out, 'in.kicad_pro'), pro)
-    pats = [f'*{n}' for n in nets]
+    from coherent_nets import net_patterns
+    pats = net_patterns(nets)
 
     def check(tool, extra, log):
         with open(os.path.join(out, log), 'w') as f:
@@ -182,7 +183,7 @@ def run(mode, bench, dest, k, out, board=None, src='U1', fanout=True, turn=None,
     import pairs as _pairs
     legs = [l_ for pr in _pairs.pair_names(nets, admit_all=True).values() for l_ in pr]
     singles = [n for n in nets if n not in legs]
-    pats = lambda ns: [f'*{n}' for n in ns]
+    from coherent_nets import net_patterns as pats
     timing, t0 = {}, time.time()
 
     def step(name, argv, env=None, timeout=None):

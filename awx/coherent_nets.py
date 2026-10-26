@@ -7,11 +7,24 @@ into small K and measures a harder problem than the campaign's -- at
 K=8 the braid emits 593 DRC violations on the launch-y prefix and 0 on
 this one."""
 import os
+import re
 import sys
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BENCH = os.path.join(HERE, 'fb_t2q_fresh.kicad_pcb')
+
+
+def net_patterns(names):
+    """The checkers' --nets patterns (fnmatchcase) for the nets `names`: each net as named and under any sheet path
+    (NAME, */NAME) -- not *NAME, which takes every net whose name merely ENDS so (a bus net CK took SCK and ADC_CK: an
+    open one failed the bus's connectivity, its violations counted as the bus's). A glob character in a name is
+    bracketed, so it matches only itself (DATA[0])."""
+    out = []
+    for n in names:
+        q = re.sub(r'([*?\[])', r'[\1]', n)
+        out += [q, '*/' + q]
+    return out
 
 
 def ladder_of(board=BENCH):

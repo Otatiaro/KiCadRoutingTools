@@ -253,7 +253,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     import make_bench as mb
     import flow_frame as ff
     import whole_route as wr
-    from coherent_nets import coherent_nets, whole_pairs
+    from coherent_nets import coherent_nets, net_patterns, whole_pairs
     from kicad_parser import parse_kicad_pcb
     from fix_kicad_drc_settings import fix_project_for_output
     import braid as te
@@ -596,7 +596,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     # ...and so does one the whole route left OPEN (its best round short of every lane, exit 1): the step hands on what
     # it laid connected, never nothing for the sake of a few nets, and the rest of the chain routes those
     if rc != 0:
-        wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + [f'*{n}' for n in nets], dict(os.environ),
+        wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + net_patterns(nets), dict(os.environ),
                log_path=os.path.join(work, 'conn_open.log'), own_process=True)
         opened = sorted(open_nets(os.path.join(work, 'conn_open.log')) & set(nets))
         for n in opened:
@@ -642,7 +642,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     zone_nets = {short(pcb.nets[z.net_id].name) for z in (pcb.zones or []) if z.net_id in pcb.nets}
     put_others = set()
     for _ in range(6):
-        pats = [f'*{n}' for n in nets]
+        pats = net_patterns(nets)
         cc = wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + pats, dict(os.environ),
                     log_path=os.path.join(work, 'conn.log'), own_process=True)[0]
         d_bus, d_out = drc(routed_pcb, 'bus', '--nets', *pats), drc(routed_pcb, 'board')
