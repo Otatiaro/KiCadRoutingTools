@@ -1011,6 +1011,30 @@ walked in order. On that bus's round-one benches at K32, K40 and K47 each had
 a plan at the first check, the whole fanout in 14 to 108 s, where the search's
 took 455 to 1193 s.
 
+Two lanes cross only where their orders round the boxes are **strictly**
+opposite: exits within `TIE_MM` round a box are one exit -- two lanes leaving
+one point on two layers -- and decide nothing there, as [the
+frame](#the-frame-whole_framepy) takes their order from the other end. Broken
+by the lanes' index instead, a tie made crossings the model and the solve
+counted differently: on one escape bus all ten the model missed were stacks.
+A lane whose two ends stand on different layers changes layer between them,
+`JOINT_CHG` (a via a leg). The model is written per pair of **lanes**, not per
+pair of options -- a lane's conflicts with another's an at-most-one round
+each option of the side with fewer; each end's layer one-hot; two ends whose
+runs meet or stack one literal per pair of lanes; the crossings on
+order-encoded places (each lane's literals [place >= v], chained; a lane
+before another a clause per threshold; a pair whose order the places settle a
+constant) -- the same choices, rules and objective in a sixth of the
+constraints, built and presolved in about a second where the per-option form
+took fifteen. The search starts from a **feasible** state: the descent breaks
+rules it does not see (conflicts, a pair's hands, the layer rules), and CP-SAT
+dropped such a hint and started from its own, several times worse. So the
+descent's ends, and the joint ends the round before chose (its plan sidecar's
+`joint_ends`), are each moved to the nearest state every rule allows (fewest
+ends moved, `START_WORK` deterministic seconds on one worker), completed for
+the objective, and the better one hints every variable. On one escape bus over
+four seeds the step ended with 11 nets open against 13, in about 40% less time.
+
 **The far-face cut.** Berths on the destination's far face go round its
 north or its south side, split at the middle of the widest gap between them.
 The model takes that cut from its own exits and it rides the plan sidecar
@@ -1168,7 +1192,9 @@ corridor, branch or path:
   do not (`room_inside`): a cap at the corner is gone round, a header lying
   along the face with the ring's berths behind it is passed inside;
 - the two **orders** the solve inverts: the teeth round the source, the
-  berths round the destination;
+  berths round the destination -- two lanes at one place round a box (within
+  `TIE_MM`: a stack, one exit on two layers) in the order the other end gives
+  them, so a stack makes no crossing, as the ends model counts them;
 - each lane's taut **reference path**.
 
 Its lanes are the run's nets that start at its source: each net's source the

@@ -205,6 +205,12 @@ def _clique_bound(m, act, lanes, X, NL):
     bk(set(), set(lanes), set())
 
 
+def _crossed(ps, pd, a, b):
+    """lanes a and b CROSS: their places round the source's box (ps {lane: place}) and the destination's (pd) in
+    STRICTLY opposite orders -- a tie at either end (TIE_MM: one exit, two layers) decides nothing"""
+    return (ps[a] < ps[b] - TIE_MM and pd[a] > pd[b] + TIE_MM) or (ps[a] > ps[b] + TIE_MM and pd[a] < pd[b] - TIE_MM)
+
+
 LOAD_OK = 0.5             # a lane's congestion on the trunk (score) the solve takes freely ...
 W_CONG = 20.0             # ... past it, vias per the square of the overload
 X_TRUNK = 0.2             # a crossing on the trunk, in vias
@@ -215,7 +221,8 @@ FB_OTHER_LAYER = 0.5      # ... this much on the other layer there (a layer chan
 FB_RADIUS = 0.76          # ... falling to nothing this far beyond the place ...
 FB_ESCALATE = 2.0         # ... and this many times more each later round it is named again
 BIG = 100000.0            # a conflict, a split pair or a refused end: never taken
-RANK_MM = 1.0e4           # a branch's rank across the trunk, in mm round its part: past any part's perimeter (whole_frame)
+TIE_MM = 0.005            # exits nearer than this round a box are ONE exit, whose lanes cross no one there (whole_frame's)
+RANK_MM = 1.0e4          # a branch's rank across the trunk, in mm round its part: past any part's perimeter (whole_frame)
 FRONT_REACH = 1.2         # a single lane's exit: its straight run out, this far along its escape (as a pair's,
 #                           fanout_from_plan.PAIR_EXIT_REACH), against copper outside the run on its layer (exit_front) --
 FRONT_VIA = 1.0           # ... blocked, with room for a via before the block: the lane changes layer there ...
@@ -903,13 +910,15 @@ class Ends:
         if far_l:
             def _rank(c_):
                 # (the lanes crossed -- and the other nets' tracks across the side each far lane rides: side_fences)
-                kp_ = {l_: (whole_frame.perim_s(to[l_][1], SB, c_), idx[l_]) for l_ in lanes}
-                return sum(1 for a, b in itertools.combinations(lanes, 2) if (kp_[a] < kp_[b]) != (kd[a] < kd[b])) \
+                pp_ = {l_: whole_frame.perim_s(to[l_][1], SB, c_) for l_ in lanes}
+                return sum(1 for a, b in itertools.combinations(lanes, 2) if _crossed(pp_, pd, a, b)) \
                     + sum(len(self.fence.get('N' if to[l_][1][1] <= c_ else 'S', ())) for l_ in far_l)
             scut_[0] = whole_frame.src_cut([to[l_][1][1] for l_ in far_l], SB[1], SB[3], rank=_rank)
         ps = {l_: psrc(to[l_][1]) for l_ in lanes}
         kp = {l_: (ps[l_], idx[l_]) for l_ in lanes}
-        inv = [(a, b) for a, b in itertools.combinations(lanes, 2) if (kp[a] < kp[b]) != (kd[a] < kd[b])]
+        # (crossed: STRICTLY opposite orders round the two boxes; a tie at either -- one exit, two layers -- decides
+        # nothing, the frame taking its order there from the other end: whole_frame.tie_rank)
+        inv = [(a, b) for a, b in itertools.combinations(lanes, 2) if _crossed(ps, pd, a, b)]
         flat = {l_: tl[l_] == dl[l_] for l_ in lanes}
         same = [(a, b) for a, b in inv if flat[a] and flat[b] and tl[a] == tl[b]]
         # split pairs: another lane's end on the pair's layer between its two tips, at either end
@@ -2043,6 +2052,8 @@ JOINT_LEARN = 20.0         # a crossing in a failing check's core: this many via
 JOINT_TRIES = 4            # the joint ends put to the check this many times before the local search takes over
 JOINT_BATCHES = 40         # CP-SAT's interleaved batches, the solve's budget (reproducible)
 JOINT_SEED = awx_settings.get('JOINT_SEED') or ''   # (probe) CP-SAT's random_seed for the joint ends: another trajectory
+JOINT_CHG = 1.0            # a lane whose ends stand on different layers changes layer between them: a via a leg
+START_WORK = 30.0          # the search's start, the nearest state the rules allow: CP-SAT's deterministic seconds, one worker
 
 
 JOINT_SWEEPS = 30          # the descent's sweeps at most (joint_descent)
@@ -2074,6 +2085,7 @@ def joint_descent(E, s0, boxes, cut, learned=None):
     lanes = [l_ for l_, _lg in E.lanes]
     n = len(lanes)
     Q = lambda v_: int(round(v_ * 1000))
+    TQ = Q(TIE_MM)
     cut_ = float(cut[1]) if isinstance(cut, (tuple, list)) and cut[0] == 'E' else cut
     # (the source's far-face cut: the start's, as the model reads it -- a far-face tooth's side round the source)
     scut = E.score(s0)[1].get('scut')
@@ -2096,15 +2108,14 @@ def joint_descent(E, s0, boxes, cut, learned=None):
     s = dict(s0)
 
     def costs(l_):
-        # (every (tooth, berth) of lane l_ against the others' ends as they stand: a tie in place broken by the run's
-        # order, as the model's)
-        L = lanes.index(l_)
+        # (every (tooth, berth) of lane l_ against the others' ends as they stand: crossed where the orders are STRICTLY
+        # opposite, a tie deciding nothing, as the model's)
         ps = np.array([PT[o][s[o][0]] for o in lanes])
         pd = np.array([PB[o][s[o][1]] for o in lanes])
-        aft = np.arange(n) > L
-        lt = (PT[l_][:, None] < ps[None, :]) | ((PT[l_][:, None] == ps[None, :]) & aft[None, :])
-        ld = (PB[l_][:, None] < pd[None, :]) | ((PB[l_][:, None] == pd[None, :]) & aft[None, :])
-        c_ = lin[(l_, 0)][:, None] + lin[(l_, 1)][None, :] + (lt[:, None, :] != ld[None, :, :]).astype(float) @ W[l_]
+        bs_, as_ = PT[l_][:, None] < ps[None, :] - TQ, PT[l_][:, None] > ps[None, :] + TQ
+        bd_, ad_ = PB[l_][:, None] < pd[None, :] - TQ, PB[l_][:, None] > pd[None, :] + TQ
+        xx_ = (bs_[:, None, :] & ad_[None, :, :]) | (as_[:, None, :] & bd_[None, :, :])
+        c_ = lin[(l_, 0)][:, None] + lin[(l_, 1)][None, :] + xx_.astype(float) @ W[l_]
         for k_ in (0, 1):
             hit = [i for i in range(len((E.T if k_ == 0 else E.B)[l_])) if any(s[o][k_] == j for o, j in cf[(l_, k_, i)])]
             if hit:
@@ -2131,25 +2142,73 @@ def joint_descent(E, s0, boxes, cut, learned=None):
         tot += lin[(la, 0)][s[la][0]] + lin[(la, 1)][s[la][1]]
         for b in range(a + 1, n):
             lb = lanes[b]
-            ls = PT[la][s[la][0]] <= PT[lb][s[lb][0]]
-            ld = PB[la][s[la][1]] <= PB[lb][s[lb][1]]
-            if ls != ld:
+            ds_, dd_ = PT[la][s[la][0]] - PT[lb][s[lb][0]], PB[la][s[la][1]] - PB[lb][s[lb][1]]
+            if (ds_ < -TQ and dd_ > TQ) or (ds_ > TQ and dd_ < -TQ):
                 nx += 1
                 tot += W[la][b]
     return s, tot, nx
 
 
+def _last_ends():
+    """{lane: [tooth signature, berth signature]}: the joint ends the round before chose (its plan sidecar's
+    `joint_ends`, INCREMENTAL=), or None"""
+    import json
+    p_ = awx_settings.get('INCREMENTAL')
+    if not p_ or not os.path.isfile(p_):
+        return None
+    try:
+        return json.load(open(p_, encoding='utf-8')).get('joint_ends') or None
+    except (OSError, ValueError):
+        return None
+
+
+def _opt_sig(o):
+    """an end option's signature, its legs' moves -- the same end on a field built again"""
+    import source_realize as sr
+    return tuple(sr.move_sig(m_) for m_ in o[0])
+
+
+def _stars(pairs, idx):
+    """{(a, b): [(side, centre option, [the other lane's options])]}: a relation between two lanes' options (`pairs`
+    [(lane, option, lane, option)]) covered by stars round the side with the fewer centres"""
+    rel = collections.defaultdict(set)
+    for a, i, b, j in pairs:
+        if idx[a] > idx[b]:
+            a, i, b, j = b, j, a, i
+        rel[(a, b)].add((i, j))
+    out = {}
+    for (a, b), ps in sorted(rel.items(), key=lambda kv: (idx[kv[0][0]], idx[kv[0][1]])):
+        fa, fb = collections.defaultdict(list), collections.defaultdict(list)
+        for i, j in sorted(ps):
+            fa[i].append(j)
+            fb[j].append(i)
+        out[(a, b)] = [(0, i, js) for i, js in fa.items()] if len(fa) <= len(fb) else \
+            [(1, j, is_) for j, is_ in fb.items()]
+    return out
+
+
 def joint_state(E, hint, learned=None, log=print, boxes=None):
     """(state, how) -- THE JOINT ENDS on `E` at its cut (E.wcut, held: the far face's or a winding's), hinted from
     `hint` (`boxes` (SB, DB) the orders' frame, else the hint's: joint_boxes): one boolean per lane and option (refused
-    ones left out), the model's conflicts (oconf) and a pair's
-    opposite hands forbidden; each end on a layer of its domain (end_domain: a surface end fixed, a via end on the
-    layers its runs clear, its via dropped on its neck's); two lanes whose orders round the two pad boxes differ CROSS,
-    and where neither changes layer their ends stand on different layers; two via ends whose runs meet, and two legs
-    stacked at one exit, on different layers. Minimized: the fanout's vias (less those dropped), JOINT_X a crossing and
-    `learned` {frozenset of two lanes: vias} more for those, a single's blocked front, the whole route's feedback
-    (FB_AVOID, FB_PAIR) and a walled plane ball (WALLED) as the objective prices them. Changes and stacks are free:
-    the strict check judges where the changes go. (None, why) with no state"""
+    ones left out); a lane's conflicts with another's, and a pair's opposite hands, forbidden; each end on a layer of
+    its domain (end_domain: a surface end fixed, a via end on the layers its runs clear, its via dropped on its neck's);
+    two lanes whose orders round the two pad boxes are STRICTLY opposite (a tie, one exit on two layers, decides nothing:
+    TIE_MM) CROSS, and where neither changes layer their ends stand on different layers; two via ends whose runs meet,
+    and two legs stacked at one exit, on different layers. Minimized: the fanout's vias (less those dropped), JOINT_X a
+    crossing and `learned` {frozenset of two lanes: vias} more for those, JOINT_CHG a leg of a lane changing layer, a
+    single's blocked front, the whole route's feedback (FB_AVOID, FB_PAIR) and a walled plane ball (WALLED) as the
+    objective prices them.
+
+    Each rule is written per pair of LANES, not per pair of options -- the model a sixth the size, built and presolved
+    in a second where the per-option form took fifteen: a lane's conflicts with another's an at-most-one round each
+    option of the side with fewer; each end's layer one-hot (a layer only where the chosen option allows it); two ends
+    whose runs meet or stack one literal per pair of lanes, raised by any such pair of options; the crossings on
+    ORDER-ENCODED places (each lane's [place >= v] literals, chained), a lane before another a clause per threshold, a
+    pair whose order the places settle a constant. The search starts from a FEASIBLE state: the descent's ends (`hint`,
+    which breaks rules the descent does not see -- CP-SAT ignores a hint that does) and the joint ends the round before
+    chose (_last_ends), each moved to the nearest state every rule allows (fewest ends moved, START_WORK), its layers
+    and crossings then solved for the objective, the better one the hint of every variable. (None, why) with no state"""
+    import bisect
     import whole_frame
     import whole_solve
     from ortools.sat.python import cp_model
@@ -2168,101 +2227,186 @@ def joint_state(E, hint, learned=None, log=print, boxes=None):
     if isinstance(cut, (tuple, list)) and cut[0] == 'E':
         cut = float(cut[1])
     Q = lambda v_: int(round(v_ * 1000))
+    O_ = {0: OT, 1: OB}
+    opts = lambda k_: E.T if k_ == 0 else E.B
+    NL = E.NL
     m = cp_model.CpModel()
-    xs = {0: {l_: {i: m.NewBoolVar('') for i in OT[l_]} for l_ in lanes},
-          1: {l_: {j: m.NewBoolVar('') for j in OB[l_]} for l_ in lanes}}
+    # (every set the model is built from walked SORTED: a lane's name hashes differently in every process, and a model
+    # built in another order breaks CP-SAT's ties another way -- three runs of one frame, three ends, all optimal)
+    xs = {k_: {l_: {i: m.NewBoolVar('') for i in O_[k_][l_]} for l_ in lanes} for k_ in (0, 1)}
     for k_ in (0, 1):
         for l_ in lanes:
             m.AddExactlyOne(xs[k_][l_].values())
-            h_ = hint[l_][k_]
-            if h_ in xs[k_][l_]:
-                for i, v in xs[k_][l_].items():
-                    m.AddHint(v, int(i == h_))
-    # (every set the model is built from walked SORTED: a lane's name hashes differently in every process, and a model
-    # built in another order breaks CP-SAT's ties another way -- three runs of one frame, three ends, all optimal)
+    cost = []
+    # the conflicts, per pair of lanes
+    cpairs = {0: [], 1: []}
     for k_ in (0, 1):
         for l_ in lanes:
-            for i, v in xs[k_][l_].items():
+            for i in xs[k_][l_]:
                 for o, j in sorted(E.oconf.get((l_, k_, i), ())):
                     if idx[o] > idx[l_] and j in xs[k_][o]:
-                        m.AddBoolOr([v.Not(), xs[k_][o][j].Not()])
+                        cpairs[k_].append((l_, i, o, j))
+        for (a, b), st_ in _stars(cpairs[k_], idx).items():
+            for side, c, others in st_:
+                ca, ob = (a, b) if side == 0 else (b, a)
+                m.Add(xs[k_][ca][c] + sum(xs[k_][ob][j] for j in others) <= 1)
+    # a pair's opposite hands
     for l_ in lanes:
         if npair[l_] == 2:
             for i in OT[l_]:
-                for j in OB[l_]:
-                    if not _same_hands(E, l_, i, j):
-                        m.AddBoolOr([xs[0][l_][i].Not(), xs[1][l_][j].Not()])
-    cost = []
-    # the crossings: two lanes whose orders round the boxes (whole_frame's perimeters, a tie broken by the run's order)
-    # differ at the two ends
-    scut = E.score(hint)[1].get('scut')     # (the source's far-face cut, the hint's: whole_frame.src_cut)
-    PS = {l_: sum(Q(whole_frame.perim_s(E.T[l_][i][1], SB, scut)) * v for i, v in xs[0][l_].items()) for l_ in lanes}
-    PD = {l_: sum(Q(whole_frame.perim_c(E.B[l_][j][1], DB, cut)) * v for j, v in xs[1][l_].items()) for l_ in lanes}
-    X = {}
-    for a, b in itertools.combinations(lanes, 2):
-        ls, ld, x = m.NewBoolVar(''), m.NewBoolVar(''), m.NewBoolVar('')
-        tb = 1 if idx[a] < idx[b] else 0
-        m.Add(PS[a] < PS[b] + tb).OnlyEnforceIf(ls); m.Add(PS[a] >= PS[b] + tb).OnlyEnforceIf(ls.Not())
-        m.Add(PD[a] < PD[b] + tb).OnlyEnforceIf(ld); m.Add(PD[a] >= PD[b] + tb).OnlyEnforceIf(ld.Not())
-        m.AddBoolXOr([ls, ld, x.Not()])
-        X[(a, b)] = x
-        cost.append(Q(JOINT_X + (learned or {}).get(frozenset((a, b)), 0.0)) * x)
-    # each end's layer (its via, if any, dropped on its neck's), a change where the two differ
-    Lv, Dv, chg = {}, {}, {}
-    for l_ in lanes:
-        for k_ in (0, 1):
-            L_, D_ = m.NewIntVar(0, E.NL - 1, ''), m.NewBoolVar('')
-            V_ = m.NewIntVar(0, len((E.T if k_ == 0 else E.B)[l_]) - 1, '')
-            m.Add(V_ == sum(i * v for i, v in xs[k_][l_].items()))
-            tup = []
-            for i in xs[k_][l_]:
-                fx, nk, ok_ = E.end_domain((E.T if k_ == 0 else E.B)[l_][i], k_, LG[l_])
-                tup += [(i, fx, 0)] if fx is not None else [(i, q, int(q == nk)) for q in sorted(ok_)]
-            m.AddAllowedAssignments([V_, L_, D_], tup)
-            Lv[(l_, k_)], Dv[(l_, k_)] = L_, D_
-        c_ = m.NewBoolVar('')
-        m.Add(Lv[(l_, 0)] != Lv[(l_, 1)]).OnlyEnforceIf(c_); m.Add(Lv[(l_, 0)] == Lv[(l_, 1)]).OnlyEnforceIf(c_.Not())
-        chg[l_] = c_
-    for (a, b), x in X.items():
-        m.Add(Lv[(a, 0)] != Lv[(b, 0)]).OnlyEnforceIf([x, chg[a].Not(), chg[b].Not()])
-    # two via ends whose runs meet on different layers (end_clashes' sep), and two legs stacked at one exit (_stacks)
-    own_ = lambda k_, l_, i: (lambda L_: E.RL.index(L_) if L_ in E.RL else None)((E.T if k_ == 0 else E.B)[l_][i][2])
+                js = [j for j in OB[l_] if not _same_hands(E, l_, i, j)]
+                if js:
+                    m.Add(xs[0][l_][i] + sum(xs[1][l_][j] for j in js) <= 1)
+    # each end's layer, one-hot; the via dropped on its neck's layer
+    dom = {(k_, l_, i): E.end_domain(opts(k_)[l_][i], k_, LG[l_]) for k_ in (0, 1) for l_ in lanes for i in xs[k_][l_]}
+    y = {k_: {l_: [m.NewBoolVar('') for _ in range(NL)] for l_ in lanes} for k_ in (0, 1)}
     for k_ in (0, 1):
+        for l_ in lanes:
+            m.AddExactlyOne(y[k_][l_])
+            for q in range(NL):
+                ok = [v for i, v in xs[k_][l_].items()
+                      if (dom[(k_, l_, i)][0] == q if dom[(k_, l_, i)][0] is not None else q in dom[(k_, l_, i)][2])]
+                if len(ok) < len(xs[k_][l_]):
+                    m.Add(y[k_][l_][q] <= sum(ok))
+            byneck = collections.defaultdict(list)
+            for i, v in xs[k_][l_].items():
+                fx_, nk_, ok_ = dom[(k_, l_, i)]
+                if fx_ is None and nk_ is not None and nk_ in ok_:
+                    byneck[nk_].append(v)
+            if byneck:
+                d_ = m.NewBoolVar('')
+                es = []
+                for q, vs in sorted(byneck.items()):
+                    e_ = m.NewBoolVar('')
+                    m.Add(e_ <= y[k_][l_][q])
+                    m.Add(e_ <= sum(vs))
+                    es.append(e_)
+                m.Add(d_ <= sum(es))
+                cost.append(-Q(1.0) * npair[l_] * d_)
+    # a change where the two ends' layers differ, JOINT_CHG a leg
+    chg = {}
+    for l_ in lanes:
+        c_ = m.NewBoolVar('')
+        for q in range(NL):
+            m.Add(c_ >= y[0][l_][q] - y[1][l_][q])
+            m.Add(c_ + y[0][l_][q] + y[1][l_][q] <= 2)
+        chg[l_] = c_
+        cost.append(Q(JOINT_CHG * npair[l_]) * c_)
+    # two via ends whose runs meet on different layers (end_clashes' sep), and two legs stacked at one exit (_stacks):
+    # per pair of lanes, then different layers
+    own_ = lambda k_, l_, i: (lambda L_: E.RL.index(L_) if L_ in E.RL else None)(opts(k_)[l_][i][2])
+    for k_ in (0, 1):
+        sp = []
         E.meet_all(k_)
         for la in lanes:
-            for ia, va in xs[k_][la].items():
-                if E.end_domain((E.T if k_ == 0 else E.B)[la][ia], k_, LG[la])[0] is not None:
+            for ia in xs[k_][la]:
+                if dom[(k_, la, ia)][0] is not None:
                     continue
                 for lb, ibs in E._meet_nbrs(la, k_, ia).items():
                     if idx[lb] <= idx[la]:
                         continue
                     for ib in sorted(ibs):
-                        if ib in xs[k_][lb] and own_(k_, la, ia) != own_(k_, lb, ib) and \
-                                E.end_domain((E.T if k_ == 0 else E.B)[lb][ib], k_, LG[lb])[0] is None:
-                            m.Add(Lv[(la, k_)] != Lv[(lb, k_)]).OnlyEnforceIf([va, xs[k_][lb][ib]])
+                        if ib in xs[k_][lb] and own_(k_, la, ia) != own_(k_, lb, ib) and dom[(k_, lb, ib)][0] is None:
+                            sp.append((la, ia, lb, ib))
         cells = collections.defaultdict(list)
         for l_ in lanes:
             for i in xs[k_][l_]:
-                for m_ in (E.T if k_ == 0 else E.B)[l_][i][0]:
+                for m_ in opts(k_)[l_][i][0]:
                     cells[(math.floor(m_.exit_pt[0] / 0.25), math.floor(m_.exit_pt[1] / 0.25))].append((l_, i, m_))
-        for (cx, cy), here in cells.items():
+        for (cx, cy), here in sorted(cells.items()):
             near = [e for dx in (-1, 0, 1) for dy in (-1, 0, 1) for e in cells.get((cx + dx, cy + dy), ())]
             for la, ia, ma in here:
                 for lb, ib, mb in near:
                     if idx[la] >= idx[lb] or ma.layer == mb.layer or \
                             math.hypot(ma.exit_pt[0] - mb.exit_pt[0], ma.exit_pt[1] - mb.exit_pt[1]) > DUP_TOL:
                         continue
-                    m.Add(Lv[(la, k_)] != Lv[(lb, k_)]).OnlyEnforceIf([xs[k_][la][ia], xs[k_][lb][ib]])
-    # the fanout's vias, less a via end's dropped on its neck's layer
-    cost.append(Q(1.0) * (sum(E.T[l_][i][3] * v for l_ in lanes for i, v in xs[0][l_].items())
-                          + sum(E.B[l_][j][3] * v for l_ in lanes for j, v in xs[1][l_].items())
-                          - sum(npair[l_] * (Dv[(l_, 0)] + Dv[(l_, 1)]) for l_ in lanes)))
-    # a single's blocked front, the whole route's feedback, a tooth on the source's far face, as the objective prices them
-    for (l_, k_), c_ in E.front.items():
-        cost += [Q(c_[i]) * v for i, v in xs[k_][l_].items() if c_.get(i)]
-    cost += [Q(FAR_TOOTH) * v for l_ in lanes for i, v in xs[0][l_].items() if _far_opt(E, E.T[l_][i])]
-    for (l_, k_), ws_ in E.fb_avoid.items():
-        cost += [Q(FB_AVOID * ws_[i]) * v for i, v in xs[k_][l_].items() if ws_.get(i)]
+                    sp.append((la, ia, lb, ib))
+        for (a, b), st_ in _stars(sp, idx).items():
+            z_ = m.NewBoolVar('')
+            for side, c, others in st_:
+                ca, ob = (a, b) if side == 0 else (b, a)
+                m.Add(z_ >= xs[k_][ca][c] + sum(xs[k_][ob][j] for j in others) - 1)
+            for q in range(NL):
+                m.Add(y[k_][a][q] + y[k_][b][q] + z_ <= 2)
+    # the crossings: places round the two boxes (whole_frame's perimeters), order-encoded
+    scut = E.score(hint)[1].get('scut')     # (the source's far-face cut, the hint's: whole_frame.src_cut)
+    pos = {(0, l_, i): Q(whole_frame.perim_s(E.T[l_][i][1], SB, scut)) for l_ in lanes for i in OT[l_]}
+    pos.update({(1, l_, j): Q(whole_frame.perim_c(E.B[l_][j][1], DB, cut)) for l_ in lanes for j in OB[l_]})
+    pv = {(k_, l_): sorted({pos[(k_, l_, i)] for i in O_[k_][l_]}) for k_ in (0, 1) for l_ in lanes}
+    H = {}
+    for (k_, l_), vs in pv.items():
+        h_ = [1] + [m.NewBoolVar('') for _ in vs[1:]] + [0]
+        for t_, v_ in enumerate(vs):
+            m.Add(h_[t_] - h_[t_ + 1] == sum(xs[k_][l_][i] for i in O_[k_][l_] if pos[(k_, l_, i)] == v_))
+        H[(k_, l_)] = h_
+    TQ = Q(TIE_MM)
+
+    def ge(k_, l_, v_):
+        """[lane l_'s place at end k_ >= v_]: a literal, or 0/1"""
+        vs = pv[(k_, l_)]
+        t_ = bisect.bisect_left(vs, v_)
+        return H[(k_, l_)][t_] if t_ < len(vs) else 0
+
+    neg = lambda e_: 1 - e_ if isinstance(e_, int) else e_.Not()
+    Bc = {}
+
+    def before(k_, a, b):
+        """[a's place < b's - TQ at end k_]: raised wherever the places say so; or 0/1"""
+        key = (k_, a, b)
+        if key not in Bc:
+            va, vb = pv[(k_, a)], pv[(k_, b)]
+            if va[-1] + TQ < vb[0]:
+                Bc[key] = 1
+            elif vb[-1] - va[0] <= TQ:
+                Bc[key] = 0
+            else:
+                rows = {}
+                for p_ in va:
+                    g_ = ge(k_, b, p_ + TQ + 1)
+                    if isinstance(g_, int):
+                        if g_ == 0:
+                            continue
+                        rows[('c', g_)] = (p_, g_)
+                    else:
+                        rows[g_.Index()] = (p_, g_)
+                lit = m.NewBoolVar('')
+                for p_, g_ in rows.values():
+                    lea = neg(ge(k_, a, p_ + 1))
+                    if any(isinstance(e_, int) and e_ == 0 for e_ in (lea, g_)):
+                        continue
+                    m.AddBoolOr([lit] + [neg(e_) for e_ in (lea, g_) if not isinstance(e_, int)])
+                Bc[key] = lit
+        return Bc[key]
+    X, const = {}, 0
+    for a, b in itertools.combinations(lanes, 2):
+        w_ = Q(JOINT_X + (learned or {}).get(frozenset((a, b)), 0.0))
+        terms = [(before(0, a, b), before(1, b, a)), (before(0, b, a), before(1, a, b))]
+        if any(all(isinstance(e_, int) and e_ == 1 for e_ in t_) for t_ in terms):
+            const += w_
+            xv = 1
+        elif all(any(isinstance(e_, int) and e_ == 0 for e_ in t_) for t_ in terms):
+            continue
+        else:
+            xv = m.NewBoolVar('')
+            for t_ in terms:
+                if any(isinstance(e_, int) and e_ == 0 for e_ in t_):
+                    continue
+                m.AddBoolOr([xv] + [neg(e_) for e_ in t_ if not isinstance(e_, int)])
+            cost.append(w_ * xv)
+        X[(a, b)] = xv
+        for q in range(NL):
+            m.Add(y[0][a][q] + y[0][b][q] + xv - chg[a] - chg[b] <= 2)
+    # the options' own costs: the fanout's vias, a single's blocked front, a far-face tooth, the feedback's avoided ends
+    for k_ in (0, 1):
+        for l_ in lanes:
+            fr, fb = E.front.get((l_, k_)) or {}, E.fb_avoid.get((l_, k_)) or {}
+            for i, v in xs[k_][l_].items():
+                o = opts(k_)[l_][i]
+                c_ = Q(1.0) * o[3] + Q(fr.get(i, 0.0)) + Q(FB_AVOID * fb.get(i, 0.0))
+                if k_ == 0 and _far_opt(E, o):
+                    c_ += Q(FAR_TOOTH)
+                if c_:
+                    cost.append(c_ * v)
     for a_, b_, k_, ia, ib in E.fb_pairs:
         for i, wa in ia.items():
             for j, wb in ib.items():
@@ -2296,8 +2440,64 @@ def joint_state(E, hint, learned=None, log=print, boxes=None):
             wl_ = m.NewBoolVar('')
             m.AddBoolOr([alive[b_], wl_] + outs)
             cost.append(Q(WALLED) * wl_)
-    m.Minimize(sum(cost))
+    m.Minimize(sum(cost) + const)
     t1 = time.time()
+    # THE START: the descent's ends and the last round's, each moved to the nearest state the rules allow and completed
+    sv_val = lambda sv_, mm_, v_: sv_.Value(mm_.GetBoolVarFromProtoIndex(v_.Index()))
+    starts = [('the descent\'s', {l_: tuple(hint[l_]) for l_ in lanes})]
+    last = _last_ends()
+    if last:
+        import json
+        ls_ = {}
+        for l_ in lanes:
+            e_ = []
+            for k_ in (0, 1):
+                # (a signature by its JSON text: the sidecar's lists and the options' tuples alike)
+                sig = json.dumps((last.get(l_) or (None, None))[k_])
+                e_.append(next((i for i in O_[k_][l_] if json.dumps(_opt_sig(opts(k_)[l_][i])) == sig), hint[l_][k_]))
+            ls_[l_] = tuple(e_)
+        starts.append(('the last round\'s', ls_))
+    best, why = None, []
+    for nm_, s0 in starts:
+        ts_ = time.time()
+        r1 = m.Clone()
+        r1.ClearObjective()
+        r1.Minimize(sum(r1.GetBoolVarFromProtoIndex(xs[k_][l_][s0[l_][k_]].Index()).Not()
+                        for k_ in (0, 1) for l_ in lanes if s0[l_][k_] in xs[k_][l_]))
+        for k_ in (0, 1):
+            for l_ in lanes:
+                for i, v in xs[k_][l_].items():
+                    r1.AddHint(r1.GetBoolVarFromProtoIndex(v.Index()), int(i == s0[l_][k_]))
+        s1_ = cp_model.CpSolver()
+        s1_.parameters.num_workers = 1
+        s1_.parameters.max_deterministic_time = START_WORK
+        q1 = s1_.Solve(r1)
+        if q1 not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            why.append(f'{nm_} ends: no state near them ({s1_.StatusName(q1)})')
+            continue
+        ends_ = {(k_, l_): next(i for i, v in xs[k_][l_].items() if sv_val(s1_, r1, v)) for k_ in (0, 1) for l_ in lanes}
+        r2 = m.Clone()
+        for k_ in (0, 1):
+            for l_ in lanes:
+                for i, v in xs[k_][l_].items():
+                    r2.Add(r2.GetBoolVarFromProtoIndex(v.Index()) == int(i == ends_[(k_, l_)]))
+        s2_ = cp_model.CpSolver()
+        s2_.parameters.num_workers = 1
+        s2_.parameters.max_deterministic_time = 30.0
+        q2 = s2_.Solve(r2)
+        if q2 not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            why.append(f'{nm_} ends: not completed ({s2_.StatusName(q2)})')
+            continue
+        why.append(f'{nm_} ends {int(s1_.ObjectiveValue())} moved, {s2_.ObjectiveValue() / 1000:.1f} '
+                   f'({time.time() - ts_:.1f} s)')
+        if best is None or s2_.ObjectiveValue() < best[0]:
+            best = (s2_.ObjectiveValue(), [s2_.Value(r2.GetIntVarFromProtoIndex(i_))
+                                           for i_ in range(len(m.Proto().variables))], nm_)
+    if best:
+        for i_, v_ in enumerate(best[1]):
+            m.AddHint(m.GetIntVarFromProtoIndex(i_), v_)
+        why.append(f'started from {best[2]}')
+    t2 = time.time()
     sv = cp_model.CpSolver()
     # (REPRODUCIBLE, as whole_solve's: stopped by a count of interleaved batches, the workers sharing no clauses)
     sv.parameters.num_workers = whole_solve.SOLVE_WORKERS
@@ -2309,13 +2509,14 @@ def joint_state(E, hint, learned=None, log=print, boxes=None):
     if JOINT_SEED:
         sv.parameters.random_seed = int(JOINT_SEED)
     r = sv.Solve(m)
-    built = f'built in {t1 - t0:.1f} s'
+    built = f'built in {t1 - t0:.1f} s; start {t2 - t1:.1f} s: {"; ".join(why)}'
     if r not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return None, f'{built}, {sv.StatusName(r)} in {time.time() - t1:.1f} s'
+        return None, f'{built}, {sv.StatusName(r)} in {time.time() - t2:.1f} s'
     s = {l_: (next(i for i, v in xs[0][l_].items() if sv.Value(v)), next(j for j, v in xs[1][l_].items() if sv.Value(v)))
          for l_ in lanes}
-    return s, (f'{built}, {sv.StatusName(r)} in {time.time() - t1:.1f} s, {sum(sv.Value(x) for x in X.values())} '
-               f'crossings, objective {sv.ObjectiveValue() / 1000:.1f} bound {sv.BestObjectiveBound() / 1000:.1f}')
+    nx = sum(1 if isinstance(x_, int) else sv.Value(x_) for x_ in X.values())
+    return s, (f'{built}, {sv.StatusName(r)} in {time.time() - t2:.1f} s, {nx} crossings, objective '
+               f'{sv.ObjectiveValue() / 1000:.1f} bound {sv.BestObjectiveBound() / 1000:.1f}')
 
 
 def joint_choose(st, log=print, fixed=None, seed=None, learned=None, free_teeth=None):
@@ -2388,8 +2589,10 @@ def joint_choose(st, log=print, fixed=None, seed=None, learned=None, free_teeth=
     log(f'  whole ends: THE JOINT ENDS ({how}; {k + 1} check(s), {time.time() - t0:.0f} s: ends model {t_e - t0:.1f} s, '
         f'greedy start {t_s - t_e:.1f} s, the cuts\' descents {t_c - t_s:.1f} s, check(s) '
         f'{" + ".join(f"{c_:.1f}" for c_ in t_chk)} s, scored {time.time() - t_f:.1f} s): {_fmt(p)}')
+    # (joint_ends: these ends by signature, for the next round's start -- the plan sidecar carries them, escape_plan)
     choose.last = dict(laid=v, laid_parts=p, free=None, free_parts=None, moved=bool(out[1]), st=id(st), cut=E.wcut,
-                       parts=p)
+                       parts=p, joint_ends={l_: [_opt_sig(E.T[l_][s[l_][0]]), _opt_sig(E.B[l_][s[l_][1]])]
+                                            for l_, _lg in E.lanes})
     return out
 
 

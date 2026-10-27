@@ -559,6 +559,8 @@ def sidecar(out, st, names, teeth, berths, cut, read=None):
     scut = ((read or {}).get('parts') or {}).get('scut')
     if scut is not None:
         plan['src_cut'] = float(scut)       # (the source's far face's cut: a far-face tooth's side round it)
+    if (read or {}).get('joint_ends'):
+        plan['joint_ends'] = read['joint_ends']     # (the joint ends chosen: the next round's start, whole_ends)
     with open(out[:-len('.kicad_pcb')] + '.plan.json', 'w', encoding='utf-8') as f:
         json.dump(plan, f, indent=1)
     return plan

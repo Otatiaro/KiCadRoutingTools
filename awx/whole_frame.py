@@ -237,6 +237,23 @@ def perim_s(p, SB, scut=None):
     return (scut - sy0) + 2 * sW + sH + (sy1 - y)
 
 
+TIE_MM = 0.005                         # exits nearer than this round a box are ONE exit
+
+
+def tie_rank(vals):
+    """{key: the index of its TIE CLUSTER} for {key: place round a box}: places within TIE_MM of the one before them
+    are one exit -- two lanes leaving one point on two layers, a stack -- whose lanes may leave in either order; their
+    order there is decided by the other end, so a tie never makes a crossing (broken by the lanes' index instead, a
+    tie made crossings the ends model could not see: on one escape bus all ten it missed were stacks)"""
+    out, k_, prev = {}, -1, None
+    for key, v in sorted(vals.items(), key=lambda kv: kv[1]):
+        if prev is None or v - prev > TIE_MM:
+            k_ += 1
+        out[key] = k_
+        prev = v
+    return out
+
+
 def tooth_face(p, SB, d=None):
     """the face of the source's box SB a tooth at p leaves by: the one its escape `d` points out of, where the escape
     runs along an axis -- else the face nearest it. Read by nearness alone, an exit past the north face beside the far
@@ -503,14 +520,21 @@ def build(ctx, dest, _trunk=frozenset()):
         b_ = F.dest_of[n_]
         return perim_dst(p) if b_ == dest else perim_c(p, F.DBs[b_], F.bcut[b_])
     F.P = {n: perim_berth(n, F.bend[n]) for n in F.M}
-    # (north to south: the destinations' ranks across the trunk, each one's lanes in their order round it)
-    F.final = sorted(F.M, key=lambda n: (F.rank[F.dest_of[n]], F.P[n]))
+    # (north to south: the destinations' ranks across the trunk, each one's lanes in their order round it; a stack at a
+    # berth -- a tie, tie_rank -- in its lanes' order at the source, round the source's box unrolled at its middle: the
+    # far face's cut is not known yet, and the order within one stack is all it decides)
+    _pb = {n: (F.rank[F.dest_of[n]], F.P[n]) for n in F.M}
+    _bt = {}
+    for r_ in set(v_[0] for v_ in _pb.values()):
+        _bt.update({n: (r_, k_) for n, k_ in tie_rank({n: v_[1] for n, v_ in _pb.items() if v_[0] == r_}).items()})
+    F.final = sorted(F.M, key=lambda n: (_bt[n], perim_s(F.tooth[n], SB), F.M.index(n)))
     # the source's far face's CUT (src_cut): the ends model's (the plan sidecar's, as the destination's), else the gap
     # between its teeth that makes the fewest crossings with the berths' order
     fi_ = {n: i for i, n in enumerate(F.final)}
 
     def _xings(c_):
-        k_ = sorted(F.M, key=lambda n: (perim_s(F.tooth[n], SB, c_), F.M.index(n)))
+        _tr = tie_rank({n: perim_s(F.tooth[n], SB, c_) for n in F.M})
+        k_ = sorted(F.M, key=lambda n: (_tr[n], fi_[n]))
         return sum(1 for i, a in enumerate(k_) for b in k_[i + 1:] if fi_[a] > fi_[b])
     scut = getattr(ctx, 'src_cut', None)
     if scut is None:
@@ -655,7 +679,10 @@ def build(ctx, dest, _trunk=frozenset()):
     for n, pts_ in F.lead.items():
         F.start[n] = tuple(map(float, pts_[-1]))
     F.st = {n: tuple(map(float, F.spine.project_pt(F.start[n]))) for n in F.M}
-    F.launch = sorted(F.M, key=lambda n: perim_src(F.tooth[n]))
+    # (a stack at the source in its lanes' order at their berths)
+    _ti = tie_rank({n: perim_src(F.tooth[n]) for n in F.M})
+    _fi = {n: i for i, n in enumerate(F.final)}
+    F.launch = sorted(F.M, key=lambda n: (_ti[n], _fi[n]))
     # ---- the rings
     dpads = [(p.global_x, p.global_y) for p in pcb.footprints[dest].pads]
     cen = (sum(p[0] for p in dpads) / len(dpads), sum(p[1] for p in dpads) / len(dpads))
