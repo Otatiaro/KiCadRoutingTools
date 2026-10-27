@@ -934,6 +934,28 @@ def _record_board_copper(config, pcb_data) -> None:
         config.board_copper_layers = copper
 
 
+def _install_plated_hole_clearance(config, input_file, pcb_data) -> None:
+    """Install the board's copper-to-hole floor as
+    ``config.plated_hole_clearance``, the value the via stamps hold a via's
+    drill and a PTH barrel to (``GridRouteConfig.via_copper_clearance``).
+
+    The same value the NPTH keep-out reads (``resolve_hole_clearance``: an
+    explicit ``config.hole_clearance``, else the board's declared
+    ``min_hole_clearance`` raised to its ``fab_floor_origin``), WITHOUT the
+    NPTH fab floor: that 0.20 is a track routing policy at mounting holes,
+    not a KiCad rule, and KiCad grades plated holes at the declared value
+    alone. Here, like the layer map, because every routing step of both
+    fronts already calls this function on its config."""
+    if not hasattr(config, 'plated_hole_clearance'):
+        return
+    try:
+        from obstacle_map import resolve_hole_clearance
+        hc = resolve_hole_clearance(pcb_data, config, input_file or None)
+    except Exception:                                           # noqa: BLE001
+        hc = 0.0
+    config.plated_hole_clearance = float(hc or 0.0)
+
+
 def _read_layer_map(input_file, pcb_data, fallback_layers):
     """({layer: mm}, notes, copper) for the board: its sibling .kicad_dru
     expanded over the board's copper list (``fallback_layers`` without one)
@@ -1015,12 +1037,14 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
         config.layer_clearances = dict(layer_clearances)
         _install_rules_quietly(config, input_file, pcb_data, net_keepouts)
         _record_board_copper(config, pcb_data)
+        _install_plated_hole_clearance(config, input_file, pcb_data)
         return
     if not input_file:
         # Engines whose signatures carry no input path (planes, fanout, oracle
         # sub-configs) discover the board file via PCBData.source_path.
         input_file = getattr(pcb_data, 'source_path', "") or ""
     _install_rules_quietly(config, input_file, pcb_data, net_keepouts)
+    _install_plated_hole_clearance(config, input_file, pcb_data)
     lmap, notes, copper = _read_layer_map(input_file, pcb_data, config.layers)
     # The copper list the map is expanded over, for pad_pair_clearance (a
     # `*.Cu` pad's shared layers are the BOARD's, not the routed subset's).

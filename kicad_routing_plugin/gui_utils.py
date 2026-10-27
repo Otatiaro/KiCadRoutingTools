@@ -878,6 +878,54 @@ def persist_live_tool_records(board, same_net_pad_clearance=None):
         pass
 
 
+def held_hole_clearance_for_results(pcb_data, board, results_data, clearance):
+    """The copper-to-hole floor to write for this step (#1369): the
+    board's declared hole clearance the engine held
+    (``obstacle_map.declared_hole_clearance`` on the PCBData it routed),
+    lowered only to what the copper this step drew needs
+    (``fix_kicad_drc_settings.step_copper_to_hole``) -- the GUI twin of
+    route_diff.py's and route.py's ``step_hole_clearance``, for the
+    ``results_data`` a batch run hands either routing tab. None (write the copper
+    clearance, as before) when the board declares none."""
+    try:
+        from obstacle_map import declared_hole_clearance
+        from fix_kicad_drc_settings import (step_copper_to_hole,
+                                            held_hole_clearance)
+        held, _src = declared_hole_clearance(
+            pcb_data, board.GetFileName() or None)
+        if not held or clearance is None or held <= clearance:
+            return None
+        segs, vias = [], []
+        for result in results_data.get('results', []):
+            segs.extend(result.get('new_segments', []))
+            vias.extend(result.get('new_vias', []))
+        segs.extend(results_data.get('all_swap_segments', []))
+        vias.extend(results_data.get('all_swap_vias', []))
+        # The board the copper was drawn on: the routed PCBData without
+        # the copper this step removed.
+        from types import SimpleNamespace
+
+        def _sk(s):
+            a = (round(s.start_x, 4), round(s.start_y, 4))
+            b = (round(s.end_x, 4), round(s.end_y, 4))
+            return (min(a, b), max(a, b), s.layer, s.net_id)
+
+        def _vk(v):
+            return (round(v.x, 4), round(v.y, 4), v.net_id)
+        _gone_s = {_sk(s) for s in results_data.get('segments_to_remove') or ()}
+        _gone_v = {_vk(v) for v in results_data.get('vias_to_remove') or ()}
+        pcb = SimpleNamespace(
+            segments=[s for s in pcb_data.segments if _sk(s) not in _gone_s],
+            vias=[v for v in pcb_data.vias if _vk(v) not in _gone_v],
+            footprints=pcb_data.footprints,
+            board_info=pcb_data.board_info)
+        step_min = step_copper_to_hole(pcb, segs, vias, held, clearance)
+        return held_hole_clearance(held, clearance, step_min)
+    except Exception as e:                                  # noqa: BLE001
+        print(f"(copper-to-hole floor: {e}; following the copper clearance)")
+        return None
+
+
 def update_live_drc_floors(board, *, clearance=None, track_width=None,
                            via_size=None, via_drill=None,
                            hole_to_hole=None, edge_clearance=None,
