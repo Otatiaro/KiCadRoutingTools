@@ -2137,85 +2137,97 @@ def add_teardrops_to_vias(content: str,
     return ''.join(result_parts), count
 
 
+def pad_net_spans(content: str, component_ref: str, pad_number: str,
+                  with_netless: bool = False) -> List[Tuple]:
+    """(start, end, match_text) of EVERY matching pad's (net ...) token.
+
+    `with_netless=True` returns `(pad_start, pad_end, start, end, text)`
+    for every matching pad instead, with `start`/`end`/`text` None for a
+    pad that carries no net token (an unconnected pin), so a caller can
+    give such a pad a net (`set_pad_nets_in_content`).
+
+    #369 A8: returns ALL same-number pads, not just the first -- connector
+    shields / split EP paddles legally repeat one pad number, and swapping
+    only the first left the twins on the old net (half-applied swap =
+    short/open at the target).
+
+    #726: the footprint is located by the PARSER's key rather than by its
+    Reference string, so the KiCad 6/7 `(fp_text reference ...)` form is
+    handled for free and a duplicated reference resolves to the one block
+    the pad actually belongs to. Bailing here AFTER the segment/via
+    relabels have applied ships mixed-net copper, so a silent miss is the
+    expensive failure."""
+    from kicad_parser import iter_footprint_blocks
+    spans = []
+
+    # Blocks are resolved by the PARSER's key (#726). `component_ref` comes
+    # off a `kicad_parser.Pad`, so on a board with two blocks named `TP4`
+    # it is `TP4~2` -- a name the old Reference-string match could never
+    # find, which made this a SILENT no-op after the segment/via relabels
+    # had already applied. Matching the string was equally wrong the other
+    # way: it took the first block carrying the name, which is a different
+    # physical part than the one the pad belongs to.
+    for fp_start, fp_end, fp_text, _raw_ref, key in iter_footprint_blocks(
+            content):
+        if key != component_ref:
+            continue
+
+        # Find every pad with this number in this footprint, quoted or in
+        # the older unquoted spelling KiCad still reads (#1290)
+        _num = re.escape(pad_number)
+        _bare = (f'|{_num}(?=\\s)'
+                 if pad_number and re.fullmatch(r'[^\s()"]+', pad_number) else '')
+        pad_pattern = rf'\(pad\s+(?:"{_num}"{_bare})\s+\w+\s+\w+'
+        for pad_match in re.finditer(pad_pattern, fp_text):
+            pad_start_rel = pad_match.start()
+            # Find end of this pad block
+            depth = 0
+            pad_end_rel = pad_start_rel
+            for i, char in enumerate(fp_text[pad_start_rel:], pad_start_rel):
+                if char == '(':
+                    depth += 1
+                elif char == ')':
+                    depth -= 1
+                    if depth == 0:
+                        pad_end_rel = i + 1
+                        break
+
+            pad_text = fp_text[pad_start_rel:pad_end_rel]
+
+            # Find the (net id "name") or (net "name") in this pad
+            net_match = re.search(r'\(net\s+\d+\s+"(?:[^"\\]|\\.)*"\)', pad_text)
+            if not net_match:
+                # KiCad 10: (net "name") with no numeric ID
+                net_match = re.search(r'\(net\s+"(?:[^"\\]|\\.)*"\)', pad_text)
+            if not net_match:
+                # the older spelling's bare name, (net 3 GND) / (net GND)
+                net_match = re.search(r'\(net\s+(?:\d+\s+)?(?!\d+\))[^\s()"]+\)',
+                                      pad_text)
+            pad_abs = (fp_start + pad_start_rel, fp_start + pad_end_rel)
+            if net_match:
+                # Convert to absolute positions in content
+                abs_start = fp_start + pad_start_rel + net_match.start()
+                abs_end = fp_start + pad_start_rel + net_match.end()
+                spans.append(pad_abs + (abs_start, abs_end, net_match.group())
+                             if with_netless else
+                             (abs_start, abs_end, net_match.group()))
+            elif with_netless:
+                spans.append(pad_abs + (None, None, None))
+        if spans:
+            return spans  # the right footprint was found; done
+
+    return spans
+
+
 def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
     """
     Swap the net assignments of two pads in the KiCad PCB file content.
 
     Finds each pad by its component reference and pad number, then swaps their (net ...) declarations.
     """
-    def find_pad_net_spans(content: str, component_ref: str, pad_number: str) -> List[Tuple[int, int, str]]:
-        """(start, end, match_text) of EVERY matching pad's (net ...) token.
-
-        #369 A8: returns ALL same-number pads, not just the first -- connector
-        shields / split EP paddles legally repeat one pad number, and swapping
-        only the first left the twins on the old net (half-applied swap =
-        short/open at the target).
-
-        #726: the footprint is located by the PARSER's key rather than by its
-        Reference string, so the KiCad 6/7 `(fp_text reference ...)` form is
-        handled for free and a duplicated reference resolves to the one block
-        the pad actually belongs to. Bailing here AFTER the segment/via
-        relabels have applied ships mixed-net copper, so a silent miss is the
-        expensive failure."""
-        from kicad_parser import iter_footprint_blocks
-        spans = []
-
-        # Blocks are resolved by the PARSER's key (#726). `component_ref` comes
-        # off a `kicad_parser.Pad`, so on a board with two blocks named `TP4`
-        # it is `TP4~2` -- a name the old Reference-string match could never
-        # find, which made this a SILENT no-op after the segment/via relabels
-        # had already applied. Matching the string was equally wrong the other
-        # way: it took the first block carrying the name, which is a different
-        # physical part than the one the pad belongs to.
-        for fp_start, fp_end, fp_text, _raw_ref, key in iter_footprint_blocks(
-                content):
-            if key != component_ref:
-                continue
-
-            # Find every pad with this number in this footprint, quoted or in
-            # the older unquoted spelling KiCad still reads (#1290)
-            _num = re.escape(pad_number)
-            _bare = (f'|{_num}(?=\\s)'
-                     if pad_number and re.fullmatch(r'[^\s()"]+', pad_number) else '')
-            pad_pattern = rf'\(pad\s+(?:"{_num}"{_bare})\s+\w+\s+\w+'
-            for pad_match in re.finditer(pad_pattern, fp_text):
-                pad_start_rel = pad_match.start()
-                # Find end of this pad block
-                depth = 0
-                pad_end_rel = pad_start_rel
-                for i, char in enumerate(fp_text[pad_start_rel:], pad_start_rel):
-                    if char == '(':
-                        depth += 1
-                    elif char == ')':
-                        depth -= 1
-                        if depth == 0:
-                            pad_end_rel = i + 1
-                            break
-
-                pad_text = fp_text[pad_start_rel:pad_end_rel]
-
-                # Find the (net id "name") or (net "name") in this pad
-                net_match = re.search(r'\(net\s+\d+\s+"(?:[^"\\]|\\.)*"\)', pad_text)
-                if not net_match:
-                    # KiCad 10: (net "name") with no numeric ID
-                    net_match = re.search(r'\(net\s+"(?:[^"\\]|\\.)*"\)', pad_text)
-                if not net_match:
-                    # the older spelling's bare name, (net 3 GND) / (net GND)
-                    net_match = re.search(r'\(net\s+(?:\d+\s+)?(?!\d+\))[^\s()"]+\)',
-                                          pad_text)
-                if net_match:
-                    # Convert to absolute positions in content
-                    abs_start = fp_start + pad_start_rel + net_match.start()
-                    abs_end = fp_start + pad_start_rel + net_match.end()
-                    spans.append((abs_start, abs_end, net_match.group()))
-            if spans:
-                return spans  # the right footprint was found; done
-
-        return spans
-
     # Find both pads' net declarations (all same-number twins included)
-    spans1 = find_pad_net_spans(content, pad1.component_ref, pad1.pad_number)
-    spans2 = find_pad_net_spans(content, pad2.component_ref, pad2.pad_number)
+    spans1 = pad_net_spans(content, pad1.component_ref, pad1.pad_number)
+    spans2 = pad_net_spans(content, pad2.component_ref, pad2.pad_number)
 
     if not spans1 or not spans2:
         print(f"  WARNING: Could not find pad(s) to swap nets")
@@ -2234,4 +2246,35 @@ def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
     for s, e, txt in sorted(repls, key=lambda r: r[0], reverse=True):
         content = content[:s] + txt + content[e:]
 
+    return content
+
+
+def set_pad_nets_in_content(content: str, changes) -> str:
+    """Give pads the net another pad of the same board carries.
+
+    `changes` is `[(component_ref, pad_number, net_text)]`, where `net_text`
+    is a `(net ...)` token copied VERBATIM from a pad of this same content
+    (so the board's own dialect, numeric or KiCad-10 name-only, is kept), or
+    None to leave the pad with no net. Every same-number twin of a pad is
+    changed. Raises ValueError naming a pad that is not on the board, before
+    anything is changed: a half-applied permutation is a short.
+    """
+    edits = []
+    for ref, number, net_text in changes:
+        spans = pad_net_spans(content, ref, number, with_netless=True)
+        if not spans:
+            raise ValueError(f"pad {ref}.{number} is not on this board")
+        for pad_start, pad_end, s, e, _old in spans:
+            if s is not None:
+                edits.append((s, e, net_text or ''))
+            elif net_text:
+                # A net-less pad: the token goes in before the pad's closing
+                # paren. KiCad reads a pad's tokens in any order.
+                edits.append((pad_end - 1, pad_end - 1, ' ' + net_text))
+    for s, e, txt in sorted(edits, key=lambda r: r[0], reverse=True):
+        if not txt:
+            # drop the token and the whitespace before it
+            while s > 0 and content[s - 1] in ' \t\r\n':
+                s -= 1
+        content = content[:s] + txt + content[e:]
     return content

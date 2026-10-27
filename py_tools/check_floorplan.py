@@ -950,7 +950,12 @@ def main(argv=None):
     ledger_s = ledger_summary(ledger)
     # #1255: a carried fact ANOTHER instrument grades is named with it, so
     # the sentence below stays true of the facts it lists.
-    from placement.design_brief import GRADED_ELSEWHERE as _elsewhere
+    from placement.design_brief import GRADED_ELSEWHERE as _graded_elsewhere
+    # a fact by its id, or by its kind (`pin_swaps[0]` -> `pin_swaps`)
+    _elsewhere = {f: (_graded_elsewhere.get(f)
+                      or _graded_elsewhere.get(f.split('[', 1)[0]))
+                  for f in ledger_s['carried_facts']}
+    _elsewhere = {f: w for f, w in _elsewhere.items() if w}
     _carried = [f for f in ledger_s['carried_facts'] if f not in _elsewhere]
     _graded_by = [f for f in ledger_s['carried_facts'] if f in _elsewhere]
     if not args.quiet and _carried:

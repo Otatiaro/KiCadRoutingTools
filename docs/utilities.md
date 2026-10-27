@@ -33,6 +33,7 @@ runnable tool in the clone with a one-line purpose.
   [datasheet template fit](#datasheet-template-fit-fit_templatepy) ·
   [run ledger](#run-ledger-convergepy) ·
   [label tidy](#label-tidy-beautify_labelspy) ·
+  [pin swapper](#pin-swapper-swap_pinspy) ·
   [decap clearance repair](#decap-clearance-repair-place_fanout_clearancepy) ·
   [rule-area writer](#rule-area-writer-add_rule_areapy) ·
   [mounting-hole copper](#mounting-hole-copper-check_mounting_holespy)
@@ -1340,6 +1341,50 @@ look placed (parts stacked at one point) unless `--allow-unplaced`. Exit 0
 every label placed; 2 argument error; 3 the unplaced-board refusal; 4 done,
 with labels that could not be placed left unchanged and reported. The engine
 is `py_placer/placement/labels.py`; the GUI's placement tab calls it too.
+
+## Pin Swapper (`swap_pins.py`)
+
+Gives the nets on a part's equivalent gates -- the channels of an ESD array,
+the receivers of a quad line receiver, the halves of a dual op amp, or the
+gates of several identical parts side by side -- the assignment that untangles
+the placed board's ratsnest. Which gates are equivalent is declared in the
+design brief's `pin_swaps[]` ([Design Brief](design-brief.md#pin_swaps-which-pins-are-equivalent));
+nothing else is ever swapped. Run it between placement and routing.
+
+```bash
+python3 py_placer/swap_pins.py placed.kicad_pcb swapped.kicad_pcb --json-out swaps.json
+python3 py_placer/swap_pins.py placed.kicad_pcb swapped.kicad_pcb --brief my.design-brief.json     --schematic-dir path/to/project --dry-run
+```
+
+- The cost is place_simple's own signal cost: the Manhattan MST of every
+  signal net plus `--crossing-weight` (2.0, place_simple's default) x the
+  crossings among those trees; rails (ground, wide supplies) take no part.
+  An optimal assignment on the tree lengths and the input's own assignment
+  each start a descent over gate swaps (and swaps of two adjacent pairs at
+  once); the cheaper end is kept, the input on a tie.
+- A gate moves as one block, its k-th pin onto the k-th pin of the other
+  gate, so no swap inverts a polarity. Its unused nets move with it.
+- A gate keeps its nets when a pad of it has copper on it, when one of its
+  nets is protected (a matched group, a routed pair), carries locked or held
+  copper or is promised to a pour, or when it holds half of a differential
+  pair the row cannot keep on two `adjacent` gates. Each is printed with its
+  reason.
+- Only the declared pads' `(net ...)` tokens change. The written board is
+  parsed back and compared with the plan, pad by pad, before it replaces OUT.
+  Zones are not refilled.
+- `--json-out` writes the cost before and after (`tree_mm`, `crossings`,
+  `cost`), each pool's free and kept gates, and every pin changed, old net ->
+  new net. `--dry-run` writes the report and no board.
+- `--schematic-dir DIR` renumbers the swapped pins in the `.kicad_sch` files
+  there (`schematic_updater.py`, which refuses a symbol definition shared with
+  another part). A part that took nets from another part of its pool cannot be
+  written as a renumbering and is named, to rewire by hand.
+
+Exit 0 done (with or without a swap); 2 unreadable input, nothing declared,
+or a declaration the board contradicts (a missing pin, a pool of different
+footprints or values, gates mixing pin types); 3 the written board did not
+match the plan, nothing kept. It is a standalone step with no GUI control:
+it sets no routing or placement engine parameter.
 
 ## Board Renderer (`route_render.py`)
 

@@ -58,6 +58,7 @@ already grade, and that `place_simple` reads wherever it reads the intent
 | `assembly.body_edge_mm` | `assembly.body_edge_mm`, merged into the emitted `assembly` block; `why` and `requirement` move into `assembly.context.body_edge_mm`. Graded by check_assembly's `body_edge_band`, not by a floorplan rule (see [below](#assemblybody_edge_mm-the-assemblers-edge-rule)) | `context.basis`: `declared`, `min_reader` 9 |
 | `keep_away` | `keep_away[]`, one intent row per rule, in its canonical spelling; `why` and `requirement` move into `context`. Graded by `keep_away`, and read by the routing engines too (see [below](#keep_away-two-net-groups-apart)) | `source: "brief"`, `context.keep_away_note`, `min_reader` 10 |
 | `covers[]`, `heights[]` | `covers[]` / `heights[]`, one intent row per brief row, validated by the intent's own loader; the row's `source` (its datasheet) is kept. Graded by the `cover` rule, check_assembly's `height` pairs and the placer (see [below](#covers-and-heights-what-stands-over-the-board)) | `context.brief_row`, `context.from: "brief"`, `min_reader` 15 |
+| `pin_swaps[]` | nothing: carried, and applied to the board by `swap_pins.py`, which reads it off the brief (see [below](#pin_swaps-which-pins-are-equivalent)) | `pin_swaps[N]`, reported `carried` |
 | `product`, `unknown[]` | `context` | — |
 
 ### The compiler declares nothing that nothing grades
@@ -572,6 +573,65 @@ because a cover worked out once has to survive every later emit: the brief
 travels with the board, and each `--emit-intent` compiles its rows in again.
 `removable` says whether the body comes off in service, which decides
 whether a test point may stand under it.
+
+## `pin_swaps[]`: which pins are equivalent
+
+```jsonc
+"pin_swaps": [
+  { "ref": "U3",                                   // or "refs": ["U3", "U4", "U5"]
+    "gates": [["1", "10"], ["2", "9"], ["4", "7"], ["5", "6"]],
+    "common": ["3", "8"],
+    "adjacent": [["1", "2"], ["4", "5"]],
+    "why": "TPD4E05U06 (DQA, flow-through): four identical channels" },
+  { "ref": "U7",
+    "gates": [["2", "1", "3"], ["6", "7", "5"], ["10", "9", "11"], ["14", "15", "13"]],
+    "common": ["4", "12"],
+    "why": "AM26LV32 quad RS-422 receiver: (A, B, Y) per channel, enables shared" },
+  { "ref": "U9",
+    "gates": [["1", "2", "3"], ["7", "6", "5"]],
+    "common": ["4", "8"],
+    "why": "dual op amp, both halves used as followers: (OUT, IN-, IN+)" }
+]
+```
+
+Which channel of an ESD array, which receiver of a quad, which half of a dual
+op amp carries which net is a schematic convenience, and the netlist cannot
+say that the choice is free: it is a datasheet fact. One row is one POOL --
+one part (`ref`), or identical parts side by side (`refs`: the same footprint
+and value), whose gates may trade nets.
+
+| key | | |
+|---|---|---|
+| `ref` / `refs` | exactly one | the part, or the pool of identical parts |
+| `gates` | required | lists of pin numbers (**strings**), all the same length |
+| `common` | optional | pins shared by every gate (an enable, a supply), never touched |
+| `adjacent` | optional | pairs of gates side by side, each named by any one of its pins |
+| `name`, `why`, `requirement`, `note`, `context` | optional | prose, carried |
+
+A gate is an ORDERED list: its k-th pin takes the place of the k-th pin of
+the gate it trades with, so a gate never turns round and no swap inverts a
+polarity or exchanges an input for an output. A flow-through ESD channel is
+a gate of TWO pins, the line's pad and the pad facing it across the body; a
+receiver is a triplet. A gate's nets move with it, an unused channel's
+included. Declare only what is truly equivalent: a part that is not
+symmetric (a BAT54S's two diodes in series) or a connector whose pinout is
+an external interface does not belong here, and the tool swaps nothing it is
+not told to. A pool whose gates mix pin types at one position (an `input`
+where another gate has an `output`) is refused on the board.
+
+`adjacent` is how a differential pair crosses a pool: a pair
+(`list_nets.find_differential_pairs`) whose two nets run through two gates of
+the pool only ever lands on two adjacent gates of one part, and without
+`adjacent` it does not move at all.
+
+The rows are not compiled into the intent: no floorplan rule grades a pin
+assignment, so a clause `pin_swaps[N]` is reported `carried`, applied by
+`swap_pins.py` ([Utilities](utilities.md#pin-swapper-swap_pinspy)), which reads
+the rows off the brief through the same parser (`placement/pin_swap.py`,
+`brief_rows`). Refused at load: gates of different sizes, a pin in two gates
+or both in a gate and `common`, a part in two rows, an `adjacent` naming no
+gate, a pin number written as a number. `"pin_swaps": "unknown"` says the
+author looked and has not decided.
 
 ## Deferred, and named rather than silently absent
 

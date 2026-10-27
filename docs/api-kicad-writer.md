@@ -426,6 +426,24 @@ in-memory counterpart is
 [`pcb_modification.swap_pad_nets_in_pcb_data`](api-pcb-modification.md#swap_pad_nets_in_pcb_data) —
 apply both if you keep routing afterwards.
 
+### `set_pad_nets_in_content`, `pad_net_spans`
+
+```python
+set_pad_nets_in_content(content: str, changes) -> str
+pad_net_spans(content, component_ref, pad_number, with_netless=False) -> List[Tuple]
+```
+
+`set_pad_nets_in_content` gives each `(component_ref, pad_number,
+net_text)` of `changes` the `(net ...)` token `net_text`, copied verbatim
+from another pad of the same content so the board's dialect is kept, or
+removes the pad's token when `net_text` is None. A net-less pad gets the
+token inserted. Every same-number twin changes, and a pad that is not on the
+board raises ValueError before anything is changed. `pad_net_spans` is the
+locator both writers use: every matching pad's net token (`(start, end,
+text)`), or with `with_netless=True` every matching pad's block as well
+(`(pad_start, pad_end, start, end, text)`, the last three None for a pad
+with no net). `py_placer/swap_pins.py` writes its gate swaps with them.
+
 ### Removing copper
 
 ```python

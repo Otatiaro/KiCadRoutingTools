@@ -105,7 +105,12 @@ class BriefError(fp.IntentError):
 _TOP_LEVEL_KEYS = {'schema', 'kind', 'board', 'units', 'min_reader',
                    'product', 'interfaces', 'keepouts', 'fixed', 'unknown',
                    'proximity', 'context', 'arrays', 'assembly', 'keep_away',
-                   'covers', 'heights'}
+                   'covers', 'heights', 'pin_swaps'}
+#: Which pins of a part, or of a pool of identical parts, are equivalent:
+#: gates of pins that may trade nets (`placement.pin_swap`, whose
+#: `brief_rows` is the one parser of the key). Not compiled into the
+#: intent -- no floorplan rule grades a pin assignment -- but read off the
+#: brief by `swap_pins.py`, which applies it; the report carries it as such.
 #: #1443. What stands over the board and how tall the parts are, from
 #: datasheets: `covers[]` (a card in its socket, a module on its stacking
 #: connector) and `heights[]` (a part's height, or the room under its body).
@@ -260,6 +265,10 @@ class Brief:
     #: #1443. Declared covers and part heights. Defaulted, like `proximity`.
     covers: Tuple[Dict[str, object], ...] = ()
     heights: Tuple[Dict[str, object], ...] = ()
+    #: Declared pin-swap pools (`pin_swap.brief_rows`), and the declared
+    #: "unknown". Defaulted, like `proximity`.
+    pin_swaps: Tuple[Dict[str, object], ...] = ()
+    pin_swaps_unknown: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -820,6 +829,14 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
     covers = fp._cover_claims(raw)
     heights = fp._height_claims(raw)
 
+    # Read by swap_pins.py through the same parser, so a row the brief
+    # accepts is a row the tool honours.
+    from .pin_swap import brief_rows as pin_swap_rows, BRIEF_UNKNOWN as PS_UNKNOWN
+    try:
+        pin_swaps = pin_swap_rows(raw.get('pin_swaps'))
+    except ValueError as exc:
+        raise BriefError(str(exc)) from None
+
     unknown = fp._str_tuple(raw.get('unknown'), 'unknown')
     return Brief(schema=SCHEMA_VERSION, kind=KIND,
                  board=str(raw.get('board') or ''), units=units,
@@ -830,7 +847,9 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
                  source_path=source_path, arrays=tuple(arrays),
                  assembly=dict(assembly), keep_away=tuple(keep_away),
                  keep_away_unknown=raw.get('keep_away') == BRIEF_UNKNOWN,
-                 covers=tuple(covers), heights=tuple(heights))
+                 covers=tuple(covers), heights=tuple(heights),
+                 pin_swaps=tuple(pin_swaps),
+                 pin_swaps_unknown=raw.get('pin_swaps') == PS_UNKNOWN)
 
 
 def _fixed_pose(f: Dict, where: str, interface_refs) -> None:
@@ -1214,6 +1233,11 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         kaway.append(entry)
     if brief.keep_away_unknown:
         unknown.append('keep_away')
+    # Carried, not compiled: `swap_pins.py` reads the rows off the brief.
+    for r in brief.pin_swaps:
+        declared.append(f"pin_swaps[{r['row']}]")
+    if brief.pin_swaps_unknown:
+        unknown.append('pin_swaps')
 
     fragment: Dict[str, object] = {}
     if asm:
@@ -1314,6 +1338,8 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         counts['covers'] = len(brief.covers)
     if brief.heights:
         counts['heights'] = len(brief.heights)
+    if brief.pin_swaps:
+        counts['pin_swaps'] = len(brief.pin_swaps)
     if fposes:
         counts['fixed_poses'] = len(fposes)
     report = {
@@ -2157,13 +2183,16 @@ _CLAUSE_RULE = {'interfaces': 'edge_connector',
                 # which this floorplan grade does not run.
                 'assembly': None,
                 # #1253: `keep_away[N].rule`, graded by `keep_away`.
-                'keep_away': 'keep_away'}
+                'keep_away': 'keep_away',
+                # `pin_swaps[N]`: applied by swap_pins.py, graded by no rule.
+                'pin_swaps': None}
 
 #: #1255. Clauses another INSTRUMENT grades, by clause id. The floorplan
 #: grade carries them -- no rule of its own measures them -- and says where
 #: they are graded, so "carried" is not read as "checked by nothing".
 GRADED_ELSEWHERE = {
     'assembly.body_edge_mm': 'check_assembly --intent, body_edge_band',
+    'pin_swaps': 'swap_pins.py, which applies it to the board',
 }
 
 #: Interface keys that are CARRIED and graded by nothing, by design. They are
@@ -2173,7 +2202,7 @@ _CLAUSE_CARRIED = {'mount_mode', 'cable_entry', 'cable_envelope_mm'}
 
 _CLAUSE_RE = re.compile(
     r'^(?P<kind>interfaces|keepouts|proximity|arrays|fixed|product|assembly'
-    r'|keep_away)'
+    r'|keep_away|pin_swaps)'
     r'(?:\[(?P<inner>.*)\])?'
     r'(?:\.(?P<key>[a-z_]+))?$')
 
@@ -2199,6 +2228,13 @@ def parse_clause_id(cid: str) -> Optional[Dict[str, object]]:
                               'key': key, 'row': None}
     if kind in ('product', 'assembly'):
         out['ref'] = None
+        return out
+    if kind == 'pin_swaps':
+        # `pin_swaps[<row>]`, or the bare `pin_swaps` an "unknown" reports.
+        if key is not None or (inner is not None and not inner.isdigit()):
+            return None
+        out.update({'ref': None,
+                    'row': int(inner) if inner is not None else None})
         return out
     if kind == 'keep_away':
         # #1253: `keep_away[<row>].rule`, or the bare `keep_away` a brief
@@ -2309,6 +2345,10 @@ def _clause_state(rec, intent_doc, rules_run, abstained, cons=None,
                  and _intent_has(intent_doc, r.get('compiled_to'))]
         if sides and 'edge_connector' in rules_run:
             return 'graded', '', 'edge_connector'
+    if kind == 'pin_swaps':
+        # Applied, not graded: no floorplan rule reads a pin assignment.
+        return ('carried', f"applied by {GRADED_ELSEWHERE['pin_swaps']}; "
+                           f"no floorplan rule grades it", None)
     if kind == 'assembly':
         # #1255: the clause IS graded, by another instrument. Carried here
         # (it never blocks this grade's coverage), and the row says where.
@@ -2562,6 +2602,8 @@ def format_report(report: Dict, *, path: str = '') -> str:
         bits.append(f"{c['arrays']} array(s)")
     if c.get('keep_away'):
         bits.append(f"{c['keep_away']} keep-away rule(s)")
+    if c.get('pin_swaps'):
+        bits.append(f"{c['pin_swaps']} pin-swap pool(s)")
     if report.get('unknown'):
         bits.append(f"{len(report['unknown'])} declared UNKNOWN")
     if report.get('absent'):
