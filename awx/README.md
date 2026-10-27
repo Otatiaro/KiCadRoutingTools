@@ -538,7 +538,10 @@ human escapes a ball grid array:
   the band along the array's edge stays free of vias for the lanes beneath. On
   the zynq LVDS bus's two-round chains (`--rounds 2`, `LOOP_ROUNDS=2`) at
   K32, K40 and K47 it ended with 0, 0 and 2 nets open against 2, 0 and 2 with
-  every ball dog-boned, and 2 to 5 vias fewer.
+  every ball dog-boned, and 2 to 5 vias fewer. A pair dog-boned at one array
+  is dog-boned at every array: left bare at one end and through a via at the
+  other, it must change layer between the arrays, where its two barrels seldom
+  find room (one escape bus over four seeds: 19 nets open, 13 with it).
 - **A lane bare at both arrays** (`braid.bare_lane`: no track of its net, its
   pads on two parts) -- its balls outer balls at both, left without a via, or
   one ball with no gap for its dog-bone -- has no stub end to read, and the

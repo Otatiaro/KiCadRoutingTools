@@ -147,7 +147,7 @@ def dogbone(pcb, refs, log=print, only=None):
                     return False
         return True
     tracks, new_vias, stats = [], [], {}
-    for ref in refs:
+    def plan_ref(ref):
         fp = pcb.footprints[ref]
         pads = [p for p in fp.pads if p.net_id and any(L.endswith('.Cu') for L in p.layers)]
         held = 0
@@ -181,7 +181,7 @@ def dogbone(pcb, refs, log=print, only=None):
             # (no array: one ball, or none netted -- nothing to dog-bone a gap of)
             log(f'  {ref}: no ball array ({len(pads)} netted ball(s)) -- not dog-boned')
             stats[ref] = (0, 0, [])
-            continue
+            return None
         px, py = px or py, py or px              # (one row or one column: the pitch along it, both ways)
         cx, cy = (xs[0] + xs[-1]) / 2, (ys[0] + ys[-1]) / 2
         other = next((pcb.footprints[o] for o in refs if o != ref), None)
@@ -230,6 +230,37 @@ def dogbone(pcb, refs, log=print, only=None):
                     if id(p) in bare and mballs and not all(id(q) in bare for q in mballs):
                         bare.discard(id(p))
                         changed = True
+        return dict(fp=fp, pads=pads, px=px, py=py, cx=cx, cy=cy, other=other, prim_x=prim_x, bare=bare, nc=nc,
+                    ox=ox, oy=oy, only_ref=in_only[0])
+    plans = {ref: plan_ref(ref) for ref in refs}
+    # a PAIR dog-boned at one array dog-boned at every array: a pair left bare at one end and through a via at the
+    # other must change layer between the arrays, where its two barrels seldom find room (one escape bus, 4 seeds:
+    # 19 open nets -> 13)
+    import pairs as _pairs
+    short_ = lambda p: sn(getattr(p, 'net_name', '') or '')
+    names_ = sorted({short_(p) for pl in plans.values() if pl for p in pl['pads']})
+    legs_ = {}
+    for _b, (pn_, nn_) in _pairs.pair_names(names_, admit_all=True).items():
+        legs_[pn_] = legs_[nn_] = (pn_, nn_)
+    boned_ = {legs_[short_(p)] for pl in plans.values() if pl for p in pl['pads']
+              if short_(p) in legs_ and id(p) not in pl['bare']}
+    alike_ = []
+    for ref_, pl in plans.items():
+        for p in (pl['pads'] if pl else ()):
+            if id(p) in pl['bare'] and legs_.get(short_(p)) in boned_:
+                pl['bare'].discard(id(p))
+                alike_.append(f'{ref_}.{p.pad_number}')
+    if alike_:
+        log(f'  pairs alike: {len(alike_)} ball(s) of {len(boned_)} dog-boned pair(s) dog-boned at every array: '
+            f'{alike_[:20]}')
+    for ref in refs:
+        pl = plans[ref]
+        if pl is None:
+            continue
+        fp, pads, px, py, cx, cy, other, prim_x, bare, nc, ox, oy = (
+            pl[k] for k in ('fp', 'pads', 'px', 'py', 'cx', 'cy', 'other', 'prim_x', 'bare', 'nc', 'ox', 'oy'))
+        in_only[0] = pl['only_ref']
+        n_in, left, n_edge = 0, [], 0
         for p in pads:
             home = next((L for L in p.layers if L.endswith('.Cu')), 'F.Cu')
             if id(p) in bare:
