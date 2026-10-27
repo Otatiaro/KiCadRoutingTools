@@ -96,7 +96,7 @@ def brief_rows(value, where: str = BRIEF_KEY) -> List[dict]:
         raise ValueError(f"{where}: expected a list of rows or "
                          f"{BRIEF_UNKNOWN!r}, got {type(value).__name__}")
     rows: List[dict] = []
-    owner: Dict[str, int] = {}
+    owner: Dict[Tuple[str, str], int] = {}  # (ref, gate pin) -> row
     for i, entry in enumerate(value):
         at = f"{where}[{i}]"
         if not isinstance(entry, dict):
@@ -118,11 +118,6 @@ def brief_rows(value, where: str = BRIEF_KEY) -> List[dict]:
             refs = _pins(entry['refs'], f"{at}.refs")
             if len(set(refs)) != len(refs):
                 raise ValueError(f"{at}.refs: a part is listed twice")
-        for r in refs:
-            if r in owner:
-                raise ValueError(f"{at}: {r} is already in {where}"
-                                 f"[{owner[r]}] -- one part, one pool")
-            owner[r] = i
         gates_raw = entry.get('gates')
         if not isinstance(gates_raw, list) or len(gates_raw) < 1:
             raise ValueError(f"{at}.gates: expected a list of gates, each a "
@@ -150,6 +145,21 @@ def brief_rows(value, where: str = BRIEF_KEY) -> List[dict]:
         if both:
             raise ValueError(f"{at}: pin(s) {', '.join(both)} are both in a "
                              f"gate and `common`")
+        # A part may carry several pools (an MCU: its chip selects, its step
+        # outputs, its encoder timers), each on pins of its own: a gate pin
+        # belongs to one row, and no row's `common` pin is another row's gate pin.
+        for r in refs:
+            for p in seen:
+                if (r, p) in owner:
+                    raise ValueError(f"{at}: {r} pin {p} is already a gate pin "
+                                     f"of {where}[{owner[(r, p)]}] -- a pin "
+                                     f"belongs to one pool")
+                owner[(r, p)] = i
+        for r in refs:
+            for p in common:
+                if (r, p) in owner:
+                    raise ValueError(f"{at}: {r} pin {p} is `common` here and a "
+                                     f"gate pin of {where}[{owner[(r, p)]}]")
         adjacent = []
         for j, pair in enumerate(entry.get('adjacent') or ()):
             pa = _pins(pair, f"{at}.adjacent[{j}]")
