@@ -598,7 +598,12 @@ Which channel of an ESD array, which receiver of a quad, which half of a dual
 op amp carries which net is a schematic convenience, and the netlist cannot
 say that the choice is free: it is a datasheet fact. One row is one POOL --
 one part (`ref`), or identical parts side by side (`refs`: the same footprint
-and value), whose gates may trade nets.
+and value), whose gates may trade nets. A part may carry several pools on pins
+of its own -- an MCU's chip-select GPIOs in one row, its timer's step outputs in
+another, its encoder timers' (A, B, index) triplets in a third -- since a gate
+pin belongs to one row, and no row's `common` pin is another row's gate pin.
+An MCU pool holds only pins that already serve the same function, so every pin
+keeps an alternate function it can carry; the firmware maps the new assignment.
 
 | key | | |
 |---|---|---|
