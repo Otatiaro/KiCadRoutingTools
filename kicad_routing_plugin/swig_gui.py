@@ -4344,8 +4344,15 @@ class RoutingDialog(wx.Dialog):
                 import clearance_ledger
                 eff_clearance = clearance_ledger.effective(config.get('clearance')) \
                     if config.get('clearance') else config.get('clearance')
+                # The copper-to-hole floor the run held (NPTH walls, via drills,
+                # plated barrels), lowered only to what its own copper needs --
+                # route.py's step_hole_clearance, from the applied lists.
+                from gui_utils import held_hole_clearance_for_results
+                _hole_clr = held_hole_clearance_for_results(
+                    self.pcb_data, board, results_data, eff_clearance)
                 targets = compute_targets(
                     clearance=eff_clearance,
+                    hole_clearance=_hole_clr,
                     hole_to_hole=config.get('hole_to_hole_clearance'),
                     edge_clearance=config.get('board_edge_clearance'),
                     track_width=config.get('track_width'),

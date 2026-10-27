@@ -630,13 +630,37 @@ def _foreign_via_arrays(pcb_data):
     return cache[1]
 
 
+def _foreign_via_rings(pcb_data):
+    """Cached ring width ``(size - drill) / 2`` of every via, in
+    :func:`_foreign_via_arrays` order (both follow ``pcb_data.vias``)."""
+    vt = pcb_data.vias[-1] if pcb_data.vias else None
+    sig = (len(pcb_data.vias), (vt.x, vt.y, vt.net_id) if vt is not None else None)
+    cache = getattr(pcb_data, '_foreign_via_ring_cache', None)
+    if cache is None or cache[0] != sig:
+        rings = []
+        for v in pcb_data.vias:
+            size = v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0
+            drill = getattr(v, 'drill', 0) or 0.0
+            # No drill on record: the copper alone, i.e. no hole term.
+            rings.append((size - drill) / 2.0 if drill > 0 else float('inf'))
+        cache = (sig, np.asarray(rings, dtype=float))
+        pcb_data._foreign_via_ring_cache = cache
+    return cache[1]
+
+
 def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                          net_clearances=None, base_clearance=0.0):
+                          net_clearances=None, base_clearance=0.0,
+                          hole_clearance=0.0):
     """Min edge distance from a segment to any OTHER-net VIA (body), exact point-to-
     segment minus via radius. The via analogue of _seg_foreign_pad_dist; a negative
     result (centreline inside the via) is returned as-is. #436: `net_clearances`
     subtracts each foreign via's netclass excess over `base_clearance` (see
-    _seg_foreign_seg_dist)."""
+    _seg_foreign_seg_dist).
+
+    `hole_clearance` > 0 (the board's plated copper-to-hole floor) subtracts
+    the same way the excess of ``hole_clearance - ring`` over `base_clearance`
+    for each via, so a caller comparing the result to `base_clearance` holds
+    the track off the via's drill too (GridRouteConfig.via_copper_clearance)."""
     nids, cx, cy, rad = _foreign_via_arrays(pcb_data)
     if cx.size == 0:
         return 1e9
@@ -659,6 +683,9 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         excess = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
                            for f in fnid], dtype=float)
         d = d - excess
+    if hole_clearance and hole_clearance > 0:
+        ring = _foreign_via_rings(pcb_data)[near]
+        d = d - np.maximum(0.0, hole_clearance - ring - base_clearance)
     return float(np.min(d))
 
 

@@ -3,9 +3,10 @@
 track_dangling on a joint stub lying on one other track, is row 23 of
 tests/test_check_weird.py.
 
-  1. "Copper-to-hole clearance 0.25mm" did not say the floor covers NPTH
-     holes only, and FAB FLOOR RELAXED advised "re-route at that floor" for a
-     key no router setting holds at a via drill or PTH barrel.
+  1. "Copper-to-hole clearance 0.25mm" did not say which holes the floor
+     covers. (FAB FLOOR RELAXED advised "re-route at that floor" for a key no
+     router setting then held at a via drill or PTH barrel; the router now
+     holds it there too, so the advice stands.)
   2. The under-pad warning suggested "Try via <= 0.04mm" -- pitch minus
      track and clearance, clamped to nothing a fab makes.
   3. A dropped ball carried no reason, and the closing line offered only a
@@ -14,9 +15,9 @@ tests/test_check_weird.py.
      diagonal to a same-net ball (C4 -> D5, 23 um of slack).
 
 Checks:
-  1. resolve_hole_clearance announces "for NPTH holes ... plated holes and
-     vias: copper clearance"; the relaxation line for min_hole_clearance says
-     the router holds it at NPTH walls only.
+  1. resolve_hole_clearance announces "for NPTH holes ..., via drills and
+     plated holes"; the relaxation line for min_hole_clearance carries the
+     re-route advice like every other floor.
   2./3. bga_fanout on tracked glasgow_revC U30 with a 0.6 mm via at 0.8 mm
      pitch and --escalation off: the warning names the fab ladder's smallest
      via instead of a sub-floor size, and the dropped balls get one line each
@@ -109,17 +110,18 @@ def main():
                 SimpleNamespace(source_path=b), SimpleNamespace(hole_clearance=0.0),
                 pcb_file=b)
         line = buf.getvalue().strip()
-        check('the copper-to-hole floor says NPTH only',
+        check('the copper-to-hole floor names the holes it covers',
               abs(v - 0.3) < 1e-9 and 'for NPTH holes' in line
-              and 'plated holes and vias: copper clearance' in line, line)
+              and 'via drills and plated holes' in line, line)
         from fix_kicad_drc_settings import _fab_floor_disclosure
         lines = _fab_floor_disclosure(
             '', {'min_hole_clearance': 0.25},
             {'board': {'design_settings': {'rules': {'min_hole_clearance': 0.1}}}},
             {}, objects={})
         rel = next((l for l in lines if 'copper-to-hole' in l), '')
-        check('the relaxation line says re-routing cannot restore it at plated holes',
-              'NPTH walls only' in rel, rel.strip())
+        check('the relaxation line names the floor, and the closing advice '
+              'to re-route at it stands', '0.25 -> 0.1' in rel
+              and any('re-route at that floor' in l for l in lines), rel.strip())
 
         # 2./3. The under-pad warning and the dropped-ball report.
         g = os.path.join(tmp, 'g.kicad_pcb')

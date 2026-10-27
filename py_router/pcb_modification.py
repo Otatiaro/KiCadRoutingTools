@@ -5256,6 +5256,10 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     # (#760) also honours a hole pad's own override above that floor.
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE,
                    resolve_hole_clearance(pcb_data, config))
+    # The same floor holds a shortcut off a foreign VIA's drill (KiCad grades
+    # plated holes like NPTH ones): a via whose ring is narrower than it minus
+    # the clearance needs more room than its copper, and the router kept it.
+    _plated_hc = resolve_hole_clearance(pcb_data, config)
 
     def eff_clr(nid):
         if not net_clearances:
@@ -5449,7 +5453,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                       net_clearances=net_clearances, base_clearance=eff,
                                       track_clearances=_trk_clr),  # dru track rules
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff))
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      hole_clearance=_plated_hc))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
                                     base_clearance=npth_clr)  # #1038, per-hole #760
         ok = (d >= eff + w / 2.0 - 1e-4 and

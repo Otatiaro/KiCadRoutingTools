@@ -11,7 +11,7 @@ import numpy as np
 from typing import List, Optional, Tuple, Dict
 
 from kicad_parser import PCBData, Segment, Via
-from routing_config import GridRouteConfig, GridCoord, DiffPairNet, REFERENCE_GRID_STEP
+from routing_config import GridRouteConfig, GridCoord, DiffPairNet, REFERENCE_GRID_STEP, via_cu_clr
 from routing_utils import segment_length, build_layer_map, pos_key
 from connectivity import (
     find_connected_groups, find_stub_free_ends, get_stub_direction, get_net_endpoints,
@@ -1082,6 +1082,8 @@ def _min_via_center_distance(config, net_a=None, net_b=None):
     from fab_tiers import min_via_center_distance
     clr = (config.pair_clearance(net_a, net_b, kind='stack')
            if net_a is not None and net_b is not None else config.clearance)
+    # Each via's drill clears the other's copper at the plated floor too.
+    clr = via_cu_clr(config, clr)
     return min_via_center_distance(
         config.via_size, clr, config.via_drill,
         getattr(config, 'hole_to_hole_clearance', 0.0))
@@ -1101,8 +1103,9 @@ def _pair_via_offset(config, spacing_mm, p_net=None, n_net=None):
     runs. With no nets given they are the run's base clearance.
     """
     max_track_width = config.get_max_track_width()
-    pn_clr = (config.pair_clearance(p_net, n_net, kind='stack')
-              if p_net is not None and n_net is not None else config.clearance)
+    pn_clr = via_cu_clr(config, (config.pair_clearance(p_net, n_net, kind='stack')
+                                 if p_net is not None and n_net is not None
+                                 else config.clearance))
     track_via_clearance = (pn_clr + max_track_width / 2
                            + config.via_size / 2) * config.routing_clearance_margin
     return max(spacing_mm, _min_via_center_distance(config, p_net, n_net) / 2.0,
@@ -1145,8 +1148,8 @@ def _gnd_via_offsets(config, spacing_mm, gnd_net_id, pair_net_ids):
     via meets the pair on every layer, hence 'stack'. Shared by the placer and
     the router's reservation so the two cannot drift.
     """
-    gnd_pair_clr = max(config.pair_clearance(gnd_net_id, n, kind='stack')
-                       for n in pair_net_ids)
+    gnd_pair_clr = via_cu_clr(config, max(config.pair_clearance(gnd_net_id, n, kind='stack')
+                                          for n in pair_net_ids))
     max_track_width = config.get_max_track_width()
     return (spacing_mm + max_track_width / 2 + gnd_pair_clr + config.via_size / 2,
             config.via_size + gnd_pair_clr, gnd_pair_clr)
@@ -2441,7 +2444,9 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # Use max track width for clearance since via connects layers with potentially different widths
     max_track_width = config.get_max_track_width()
     # P against N, as check_drc grades the pair's own vias and tracks (#1218)
-    pn_clr = config.pair_clearance(p_net_id, n_net_id, kind='stack')
+    # A via against the partner's copper also holds its drill off it at the
+    # board's plated copper-to-hole floor (GridRouteConfig.via_copper_clearance).
+    pn_clr = via_cu_clr(config, config.pair_clearance(p_net_id, n_net_id, kind='stack'))
     track_via_clearance = (pn_clr + max_track_width / 2 + config.via_size / 2) * config.routing_clearance_margin
     min_via_spacing = config.via_size + pn_clr  # Minimum via center-to-center distance
     # ...and every layer's tracks at their own pitch (_layer_track_via_offset),
@@ -3339,8 +3344,9 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         pose_kwargs['layer_direction_preferences'] = _dirs2
         pose_kwargs['direction_preference_cost'] =             config.direction_preference_cost
     pr = PoseRouter(**pose_kwargs)
-    via_spacing_grid = max(1, int(max(spacing_mm, (config.via_size + config.pair_clearance(
-        p_net_id, n_net_id, kind='stack')) / 2) / config.grid_step + 0.5))
+    via_spacing_grid = max(1, int(max(spacing_mm, (config.via_size + via_cu_clr(
+        config, config.pair_clearance(p_net_id, n_net_id, kind='stack'))) / 2)
+        / config.grid_step + 0.5))
     max_iters = config.max_iterations * 8
 
     s_gx, s_gy = coord.to_grid(csx, csy)
@@ -5708,8 +5714,9 @@ def _process_via_positions(simplified_path, p_float_path, n_float_path, coord, c
     # Use max track width for clearance since via connects layers with potentially different widths
     max_track_width = config.get_max_track_width()
     # P against N, as check_drc grades them (#1218); the run's base without nets
-    pn_clr = (config.pair_clearance(p_net_id, n_net_id, kind='stack')
-              if p_net_id is not None and n_net_id is not None else config.clearance)
+    pn_clr = via_cu_clr(config, (config.pair_clearance(p_net_id, n_net_id, kind='stack')
+                                 if p_net_id is not None and n_net_id is not None
+                                 else config.clearance))
     track_via_clearance = (pn_clr + max_track_width / 2 + config.via_size / 2) * config.routing_clearance_margin
 
     if not p_float_path or not n_float_path or len(simplified_path) < 2:

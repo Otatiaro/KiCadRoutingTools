@@ -14,7 +14,7 @@ from collections import OrderedDict
 import math
 
 from kicad_parser import PCBData, Segment, Via, Pad, pad_drill_circles, pad_drill_capsule
-from routing_config import GridRouteConfig, GridCoord
+from routing_config import GridRouteConfig, GridCoord, via_cu_clr as _via_cu_clr, via_via_clr as _via_via_clr
 import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
     circle_offsets, segment_blocked_cells_array, segment_blocked_spans, GRID_TIE_EPS
@@ -306,7 +306,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 # #498: the via meets this copper ON seg.layer, so a .kicad_dru
                 # rule for that layer replaces the net/class value.
                 seg_clearance = config.layer_clearance(seg.layer, _obstacle_clearance(seg.net_id))
-                via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
+                via_block_mm = config.via_size / 2 + seg_width / 2 + _via_cu_clr(config, seg_clearance) + extra_clearance
                 # SPANS, like the main loop below: both producers feed
                 # _seg_via_batch and it is concatenated as one array, so a
                 # cell (N,2) here beside a span (N,3) there is a hard
@@ -332,7 +332,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
         # For via blocking by segments: via half-size + segment half-width + clearance
-        via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        via_block_mm = config.via_size / 2 + seg_width / 2 + _via_cu_clr(config, seg_clearance) + extra_clearance
         # FFI batching (2026-08-14 profiling): one Rust call per segment was
         # 7.5M crossings / ~90s across a rescue-heavy step. Accumulate the
         # (memoized, read-only) cell arrays and stamp once per build below --
@@ -452,10 +452,10 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # via-to-via cross-class clearance under-model).
         via_clearance = _obstacle_clearance(via.net_id)
         # For track blocking by vias: via half-size + max routing track half-width + clearance
-        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, via_clearance, extra_clearance)
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, via_clearance, extra_clearance, via_drill=getattr(via, 'drill', None))
         # For via-to-via: via size + routing via size + clearance. #498: two via
         # barrels meet on EVERY stack layer, so the requirement is the stack max.
-        via_via_mm = via_size / 2 + config.via_size / 2 + config.stack_clearance(via_clearance)
+        via_via_mm = via_size / 2 + config.via_size / 2 + _via_via_clr(config, config.stack_clearance(via_clearance), via_size, getattr(via, 'drill', None))
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
         # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
@@ -2280,6 +2280,18 @@ def resolve_hole_clearance(pcb_data: PCBData, config,
     where new copper goes or that MOVE copper by a measured shortfall, not on
     passes whose only alternative to their one candidate is doing nothing.
 
+    PLATED holes take the same value, without the NPTH fab floor: KiCad's
+    hole_clearance grades a via drill or a PTH barrel exactly like an NPTH
+    wall (measured with kicad-cli 10: a 0.45/0.3 via, copper 0.11 mm from a
+    track of another net, is 0.185 mm from its hole and reported against a
+    declared 0.2). ``kicad_dru.install_layer_clearances`` installs it as
+    ``config.plated_hole_clearance`` and every via stamp of the routing and
+    plane maps reads it through ``GridRouteConfig.via_copper_clearance``:
+    a via whose ring is narrower than the floor minus the copper clearance
+    keeps foreign copper off its hole, not merely off its copper. Of the
+    passes above only the smoother reads it too (a CHOOSING pass); the
+    all-or-nothing nudges stay at copper clearance for the reason given.
+
     Why it exists: this keep-out was priced at a hardcoded
     ``max(clearance, NPTH_TO_TRACK_CLEARANCE)`` -- a flat 0.20 fab floor -- and
     never read the board, while `check_drc` DOES read `min_hole_clearance`
@@ -2322,12 +2334,13 @@ def resolve_hole_clearance(pcb_data: PCBData, config,
                 "writeback relaxed in the project"
                 if _source == 'fab_floor_origin' else "the board's own "
                 "min_hole_clearance")
-        # #1217: the floor holds copper off NPTH walls only; a via drill and a
-        # PTH barrel are held at copper clearance. Say so where the number is
-        # announced, or it reads as a promise for every hole.
+        # #1217: say which holes the number covers. NPTH walls take it above
+        # the fab floor; via drills and plated barrels take it as well
+        # (config.plated_hole_clearance), where a ring narrower than it minus
+        # the copper clearance holds foreign copper off the hole.
         print(f"Copper-to-hole {v:g}mm for NPTH holes (from {_src}, above the "
-              f"{defaults.NPTH_TO_TRACK_CLEARANCE}mm fab floor); plated holes "
-              f"and vias: copper clearance")
+              f"{defaults.NPTH_TO_TRACK_CLEARANCE}mm fab floor), via drills and "
+              f"plated holes")
     return v
 
 
@@ -2342,8 +2355,10 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
       - TRACK crossing of NPTH (no-copper) holes on ALL copper layers, uses
         ``config.clearance`` -- a track can't be routed across a mounting hole
         whose only layer is *.Mask (issue #233). PTH pads and vias carry copper,
-        so their track clearance is already enforced by the pad/via copper
-        obstacles (with the real pad shape, not a round-drill approximation);
+        so their track clearance is enforced by the pad/via copper obstacles
+        (with the real pad shape, not a round-drill approximation), whose via
+        stamps also hold a via's DRILL at the plated copper-to-hole floor
+        (``GridRouteConfig.via_copper_clearance``);
       - VIA placement (hole-to-hole drill minimum) near EVERY drill, uses
         ``config.hole_to_hole_clearance``.
 
@@ -2592,7 +2607,7 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         # A track-scoped DRU rule RAISES the seg-vs-seg requirement only (#735).
         trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
-        via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        via_block_mm = config.via_size / 2 + seg_width / 2 + _via_cu_clr(config, seg_clearance) + extra_clearance
         if not _via_only:
             _c = segment_blocked_cells_array(seg.start_x, seg.start_y,
                                              seg.end_x, seg.end_y,
@@ -2689,7 +2704,7 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
         # #498: a .kicad_dru layer rule REPLACES the pair clearance on seg.layer.
         seg_clearance = config.layer_clearance(seg.layer, config.clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
-        via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        via_block_mm = config.via_size / 2 + seg_width / 2 + _via_cu_clr(config, seg_clearance) + extra_clearance
         _add_segment_obstacle_with_exclusion(
             obstacles, seg, coord, layer_idx, exclude_grid_cells, expansion_mm, via_block_mm
         )
@@ -2853,9 +2868,9 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         if via.net_id != net_id:
             continue
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
-        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, obs_clearance, extra_clearance)
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, obs_clearance, extra_clearance, via_drill=getattr(via, 'drill', None))
         # #498: via barrels meet on every stack layer -> stack max.
-        via_via_mm = via_size / 2 + config.via_size / 2 + config.stack_clearance(obs_clearance)
+        via_via_mm = via_size / 2 + config.via_size / 2 + _via_via_clr(config, config.stack_clearance(obs_clearance), via_size, getattr(via, 'drill', None))
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
         # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
@@ -3128,7 +3143,7 @@ def _via_raw_block_cells(via, config, coord, num_layers, extra_clearance,
     via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
     via_clearance = config.obstacle_clearance(getattr(via, 'net_id', 0))
     via_via_mm = (via_size / 2 + config.via_size / 2
-                  + config.stack_clearance(via_clearance))
+                  + _via_via_clr(config, config.stack_clearance(via_clearance), via_size, getattr(via, 'drill', None)))
     via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
     off_cells = math.hypot(via.x - gx * coord.grid_step,
                            via.y - gy * coord.grid_step) / coord.grid_step
@@ -3172,9 +3187,9 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
     for via in vias:
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
         via_clearance = config.obstacle_clearance(getattr(via, 'net_id', 0))
-        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, via_clearance, extra_clearance)
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, via_clearance, extra_clearance, via_drill=getattr(via, 'drill', None))
         via_via_mm = (via_size / 2 + config.via_size / 2
-                      + config.stack_clearance(via_clearance))  # #498 stack max
+                      + _via_via_clr(config, config.stack_clearance(via_clearance), via_size, getattr(via, 'drill', None)))  # #498 stack max
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
         # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
@@ -3244,7 +3259,7 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             trk_clearance = config.track_obstacle_clearance(
                 getattr(seg, 'net_id', 0), seg_clearance)
             expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
-            via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
+            via_block_mm = config.via_size / 2 + seg_width / 2 + _via_cu_clr(config, seg_clearance)
             if not _via_only:
                 _c = segment_blocked_cells_array(seg.start_x, seg.start_y,
                                                  seg.end_x, seg.end_y,
@@ -3318,7 +3333,7 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
         trk_clearance = config.track_obstacle_clearance(
             getattr(seg, 'net_id', 0), seg_clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
-        via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
+        via_block_mm = config.via_size / 2 + seg_width / 2 + _via_cu_clr(config, seg_clearance)
 
         # Sweep item 2 (#625 follow-up): the arrays already exist -- stack a
         # layer column instead of per-row int() tuple appends (this runs on
@@ -3381,9 +3396,9 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
         # Mirror add_vias_list_as_obstacles EXACTLY: same per-via cross-class
         # clearance from via.net_id, or rip-up over/under-decrements the ref-counts.
         via_clearance = config.obstacle_clearance(getattr(via, 'net_id', 0))
-        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, via_clearance, extra_clearance)
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, via_clearance, extra_clearance, via_drill=getattr(via, 'drill', None))
         via_via_mm = (via_size / 2 + config.via_size / 2
-                      + config.stack_clearance(via_clearance))  # #498 stack max
+                      + _via_via_clr(config, config.stack_clearance(via_clearance), via_size, getattr(via, 'drill', None)))  # #498 stack max
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
         # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
@@ -4032,7 +4047,8 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
 
 def _via_track_expansion_per_layer(via_size: float, config: GridRouteConfig,
                                    coord: GridCoord, clearance: float,
-                                   extra_clearance: float = 0.0):
+                                   extra_clearance: float = 0.0,
+                                   via_drill: float = None):
     """Per-layer via->track keep-out radius (cells): a via blocks tracks on EACH
     layer at THAT layer's routing-side reserve width (#156: nominal for the
     single-ended engine, where impedance/power extra width rides the routed
@@ -4044,10 +4060,17 @@ def _via_track_expansion_per_layer(via_size: float, config: GridRouteConfig,
     #498: `clearance` is the caller's net/class-resolved fallback; each layer
     a .kicad_dru rule covers uses the rule value instead (the via meets that
     layer's copper ON that layer). Add/remove twins share this helper, so the
-    per-layer values cannot desync ref-counts."""
+    per-layer values cannot desync ref-counts.
+
+    `via_drill` given: the via's hole is held off the track at the board's
+    plated copper-to-hole floor too (config.via_copper_clearance), which
+    binds when the via's ring is narrower than that floor minus clearance."""
     return [max(1, coord.to_grid_dist_safe(
                 via_size / 2 + config.route_reserve_width(layer) / 2
-                + config.layer_clearance(layer, clearance) + extra_clearance))
+                + (config.layer_clearance(layer, clearance) if via_drill is None
+                   else _via_cu_clr(config, config.layer_clearance(layer, clearance),
+                                    via_size, via_drill))
+                + extra_clearance))
             for layer in config.layers]
 
 
@@ -4493,7 +4516,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         expanded_layers = expand_pad_layers(pad.layers, config.layers)
         clr_groups = _clr_groups(expanded_layers)
         on_copper = any(l.endswith('.Cu') for l in expanded_layers)
-        via_margin = config.via_size / 2 + _via_clr(expanded_layers) + extra_clearance
+        via_margin = (config.via_size / 2 + _via_cu_clr(config, _via_clr(expanded_layers))
+                      + extra_clearance)
 
         def _emit(poly, m, via_pass, layer_idxs=None):
             gx_lo, gy_lo, nx, ny, inside, edist = _rasterize_polygon_box(poly, coord, m)
@@ -4568,7 +4592,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
 
     # Via blocking near pads - block vias if pad is on any copper layer
     if any(layer.endswith('.Cu') for layer in expanded_layers):
-        via_margin = config.via_size / 2 + _via_clr(expanded_layers) + extra_clearance
+        via_margin = (config.via_size / 2 + _via_cu_clr(config, _via_clr(expanded_layers))
+                      + extra_clearance)
         via_cells = pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
                                             config.grid_step, corner_radius, corner_buffer,
                                             off_x, off_y, rotation_deg=pad.rect_rotation)
@@ -4613,7 +4638,7 @@ def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
     else:
         corner_radius = 0
     corner_buffer = coord.grid_step * 0.75 if extra_clearance > 0 else None
-    via_margin = config.via_size / 2 + clearance + extra_clearance
+    via_margin = config.via_size / 2 + _via_cu_clr(config, clearance) + extra_clearance
     return pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
                                    config.grid_step, corner_radius, corner_buffer,
                                    off_x, off_y, rotation_deg=pad.rect_rotation)

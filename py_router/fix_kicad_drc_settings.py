@@ -1239,13 +1239,6 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
         under, total = census.get(key, (None, None))
         tail = (f"; {under} of {total} object(s) on this board are below the "
                 f"ORIGINAL {was:g}mm" if under is not None else "")
-        if key == "min_hole_clearance":
-            # #1217: no router setting holds copper off a via drill or a PTH
-            # barrel at this floor (the router applies it at NPTH walls), so
-            # "re-route at that floor" cannot restore it there.
-            tail += ("; the router holds it at NPTH walls only -- plated holes "
-                     "and vias sit at copper clearance, which re-routing does "
-                     "not change")
         if moved_here:
             lines.append(f"    {label}: {was:g} -> {now:g} mm{tail}")
         else:

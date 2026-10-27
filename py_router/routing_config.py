@@ -220,6 +220,14 @@ class GridRouteConfig:
     # check_drc already read min_hole_clearance, so on a board declaring 0.25 the
     # router would happily route into a band its own checker then flagged.
     hole_clearance: float = 0.0
+    # mm - the copper-to-hole floor for PLATED holes: KiCad's hole_clearance
+    # holds a via drill or a PTH barrel this far from copper of another net,
+    # exactly like an NPTH wall. Not a flag: resolved engine-side from the
+    # board (kicad_dru.install_layer_clearances, through
+    # obstacle_map.resolve_hole_clearance), 0 = the board declares none. It
+    # binds wherever a via's ring is narrower than this minus the copper
+    # clearance -- see via_copper_clearance.
+    plated_hole_clearance: float = 0.0
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,
     # retry it at the layer's default track width. Within neckdown_length mm
@@ -522,6 +530,36 @@ class GridRouteConfig:
         if not self.layer_clearances:
             return fallback
         return max([fallback] + list(self.layer_clearances.values()))
+
+    def via_copper_clearance(self, clearance: float, size: float = None,
+                             drill: float = None) -> float:
+        """Copper-to-copper clearance between a via (``size``/``drill``; the
+        run's own via when omitted) and copper of another net, so that its
+        HOLE also clears ``plated_hole_clearance``: the hole wall sits a ring
+        ``(size - drill) / 2`` inside the copper, so the copper must keep
+        ``max(clearance, plated_hole_clearance - ring)``.
+
+        Measured with kicad-cli 10: 0.45/0.3 vias at copper clearance 0.09
+        and min_hole_clearance 0.2 -- a track or via of another net 0.11 mm
+        from the via's copper is 0.185 mm from its hole, and KiCad reports
+        hole_clearance. Returns ``clearance`` unchanged when no plated floor
+        is installed, so a board declaring none keeps every stamp as it was."""
+        hc = self.plated_hole_clearance
+        if not hc or hc <= 0:
+            return clearance
+        if size is None:
+            size, drill = self.via_size, self.via_drill
+        if not size or not drill or size <= 0 or drill <= 0:
+            return clearance
+        return max(clearance, hc - (size - drill) / 2.0)
+
+    def via_via_clearance(self, clearance: float, size: float = None,
+                          drill: float = None) -> float:
+        """:meth:`via_copper_clearance` for a via (``size``/``drill``) against
+        a via the router places (the run's own): each one's hole must clear
+        the other's copper, so the narrower ring decides."""
+        return self.via_copper_clearance(
+            self.via_copper_clearance(clearance), size, drill)
 
     def obstacle_clearance(self, net_id: int) -> float:
         """KiCad cross-class clearance for an obstacle belonging to `net_id`.
@@ -1060,3 +1098,17 @@ class GridCoord:
     def to_grid_dist_safe(self, dist_mm: float) -> int:
         """Convert a distance in mm to grid units, rounding up for safety."""
         return math.ceil(dist_mm * self.inv_step)
+
+
+def via_cu_clr(config, clearance, size=None, drill=None):
+    """``config.via_copper_clearance`` -- a via's copper clearance raised so
+    its hole clears the board's plated copper-to-hole floor -- or
+    ``clearance`` for a config object that carries no such floor."""
+    f = getattr(config, 'via_copper_clearance', None)
+    return f(clearance, size, drill) if callable(f) else clearance
+
+
+def via_via_clr(config, clearance, size=None, drill=None):
+    """``config.via_via_clearance`` (see :func:`via_cu_clr`)."""
+    f = getattr(config, 'via_via_clearance', None)
+    return f(clearance, size, drill) if callable(f) else clearance

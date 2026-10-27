@@ -16,7 +16,7 @@ import numpy as np
 
 from kicad_parser import (PCBData, Via, Segment, Pad, POSITION_DECIMALS,
                           pad_drill_circles, pad_is_plated_through)
-from routing_config import GridRouteConfig, GridCoord
+from routing_config import GridRouteConfig, GridCoord, via_cu_clr, via_via_clr
 from routing_utils import (point_in_pad_rect, pad_rect_halfspan, filter_cells_in_pad_rect,
                            segment_blocked_cells_array)
 from geometry_utils import UnionFind
@@ -3297,7 +3297,10 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                if pnid != net_id for p in pads]
     _vx = np.array([v.x for v in _vias_l])
     _vy = np.array([v.y for v in _vias_l])
-    _vhalf = np.array([v.size / 2.0 for v in _vias_l])
+    # Half-size plus what the plated copper-to-hole floor adds over the
+    # clearance (a superset for the prefilter, like the clearance max).
+    _vhalf = np.array([v.size / 2.0 + max(0.0, via_cu_clr(config, 0.0, v.size, v.drill))
+                       for v in _vias_l])
     _sxlo = np.array([min(s.start_x, s.end_x) for s in _segs_l])
     _sxhi = np.array([max(s.start_x, s.end_x) for s in _segs_l])
     _sylo = np.array([min(s.start_y, s.end_y) for s in _segs_l])
@@ -3359,8 +3362,8 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                              & (bb[1] - vreq <= _vy)
                              & (_vy <= bb[3] + vreq))[0]:
             v = _vias_l[vi]
-            req = half + v.size / 2.0 + config.layer_clearance(  # #498
-                layer, config.obstacle_clearance(v.net_id))
+            req = half + v.size / 2.0 + via_cu_clr(config, config.layer_clearance(  # #498
+                layer, config.obstacle_clearance(v.net_id)), v.size, v.drill)
             if not (bb[0] - req <= v.x <= bb[2] + req
                     and bb[1] - req <= v.y <= bb[3] + req):
                 continue
@@ -3508,14 +3511,18 @@ def build_base_obstacles(
         # -- conservative on relaxed layers (over-blocks a repair join near a
         # foreign via), never under the rule on tightened ones.
         _clr = config.stack_clearance(config.obstacle_clearance(via.net_id))
-        foreign_centers_by_size.setdefault((via.size, _clr), []).append(
+        # The via's drill holds a track, and each drill the other via's
+        # copper, at the plated copper-to-hole floor too.
+        _tclr = via_cu_clr(config, _clr, via.size, via.drill)
+        _vclr = via_via_clr(config, _clr, via.size, via.drill)
+        foreign_centers_by_size.setdefault((via.size, _tclr, _vclr), []).append(
             coord.to_grid(via.x, via.y))
-    for (vsize, _clr), centers in foreign_centers_by_size.items():
-        track_keepout_mm = vsize / 2 + track_width / 2 + _clr + cushion
+    for (vsize, _tclr, _vclr), centers in foreign_centers_by_size.items():
+        track_keepout_mm = vsize / 2 + track_width / 2 + _tclr + cushion
         track_offs = _precompute_circle_offsets((track_keepout_mm / coord.grid_step) ** 2)
         for layer_idx in range(num_layers):
             _batch_block_circles_cell(obstacles, centers, track_offs, layer_idx)
-        via_keepout_mm = vsize / 2 + config.via_size / 2 + _clr + cushion
+        via_keepout_mm = vsize / 2 + config.via_size / 2 + _vclr + cushion
         via_offs = _precompute_circle_offsets((via_keepout_mm / coord.grid_step) ** 2)
         _batch_block_circles_via(obstacles, centers, via_offs)
 
@@ -3591,7 +3598,7 @@ def build_base_obstacles(
             # guard for butterstick DQ11). Stamp the via keep-out only.
             if seg.layer.endswith('.Cu'):
                 via_seg_expansion_mm = (config.via_size / 2 + seg.width / 2
-                                        + _seg_clr + cushion)
+                                        + via_cu_clr(config, _seg_clr) + cushion)
                 _block_segment_via_obstacle(obstacles, seg, coord,
                                             via_seg_expansion_mm)
             continue
@@ -3602,7 +3609,8 @@ def build_base_obstacles(
                             + cushion)
         _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         # Also block vias along this segment - must include segment width for proper clearance
-        via_seg_expansion_mm = config.via_size / 2 + seg.width / 2 + _seg_clr + cushion
+        via_seg_expansion_mm = (config.via_size / 2 + seg.width / 2
+                                + via_cu_clr(config, _seg_clr) + cushion)
         _block_segment_via_obstacle(obstacles, seg, coord, via_seg_expansion_mm)
 
     # Block pads from non-plane nets on their respective layers
@@ -3669,7 +3677,7 @@ def build_base_obstacles(
                     obstacles.add_blocked_cells_batch(np.hstack([rect_cells, layer_col]))
             # Also block vias around pad - new via radius + clearance from pad edge
             # (issue #173 parity: was config.via_size/2 + the flat 0.8 constant).
-            via_expansion_mm = config.via_size / 2 + pad_clr + cushion
+            via_expansion_mm = config.via_size / 2 + via_cu_clr(config, pad_clr) + cushion
             via_half_w, via_half_h = pad_rect_halfspan(pad, via_expansion_mm)
             via_min_gx, _ = coord.to_grid(pad.global_x - via_half_w, 0)
             via_max_gx, _ = coord.to_grid(pad.global_x + via_half_w, 0)

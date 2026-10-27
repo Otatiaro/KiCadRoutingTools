@@ -13,7 +13,7 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 
 from kicad_parser import PCBData, Pad, Segment
-from routing_config import GridRouteConfig, GridCoord
+from routing_config import GridRouteConfig, GridCoord, via_cu_clr, via_via_clr
 from routing_utils import iter_pad_blocked_cells, pad_blocked_cells_array, \
     segment_blocked_cells_array, segment_blocked_spans
 from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
@@ -476,6 +476,10 @@ def build_via_obstacle_map(
         _clr = (config.clearance if via.net_id == exclude_net_id
                 else config.obstacle_clearance(via.net_id))
         _clr = config.stack_clearance(_clr)  # #498: barrels meet on every layer
+        if via.net_id != exclude_net_id:
+            # A foreign via's drill and the new via's drill each clear the
+            # other's copper at the plated copper-to-hole floor.
+            _clr = via_via_clr(config, _clr, via.size, via.drill)
         centers_by_size.setdefault((via.size, _clr), []).append(coord.to_grid(via.x, via.y))
     for (vsize, _clr), via_centers in centers_by_size.items():
         via_via_expansion_mm = vsize / 2 + config.via_size / 2 + _clr + grid_cushion
@@ -499,8 +503,8 @@ def build_via_obstacle_map(
         # Include grid cushion for discretization; price the segment's net at its
         # netclass clearance (#434 cross-class).
         seg_expansion_mm = (config.via_size / 2 + seg.width / 2
-                            + config.layer_clearance(  # #498: meet on seg.layer
-                                seg.layer, config.obstacle_clearance(seg.net_id))
+                            + via_cu_clr(config, config.layer_clearance(  # #498: on seg.layer
+                                seg.layer, config.obstacle_clearance(seg.net_id)))
                             + grid_cushion)
         # FFI batching (2026-08-14): accumulate the memoized capsule arrays
         # and stamp once after the loop -- concatenation preserves the exact
@@ -640,6 +644,8 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     if clearance_override is None:
         # A pad override REPLACES the resolved value (KiCad, measured).
         clearance = config.pad_override_clearance(clearance, pad)
+        # The new via's drill clears a foreign pad at the plated floor too.
+        clearance = via_cu_clr(config, clearance)
     margin = config.via_size / 2 + clearance + config.grid_step / 2
     if getattr(pad, 'polygons', None):
         _block_custom_pad_polys(obstacles, pad, coord, margin, via_mode=True)
@@ -1311,8 +1317,9 @@ def build_routing_obstacle_map(
         # clearance envelope (#70). The grid-circle-on-quantised-cell form lost up
         # to ~half a cell on the via side.
         r_mm = (via.size / 2 + route_track_w / 2
-                + config.layer_clearance(  # #498: the route meets it on route_layer
-                    route_layer, config.obstacle_clearance(via.net_id))
+                + via_cu_clr(config, config.layer_clearance(  # #498: on route_layer
+                    route_layer, config.obstacle_clearance(via.net_id)),
+                    via.size, via.drill)
                 + config.grid_step / 2)
         rg = coord.to_grid_dist_safe(r_mm)
         r_sq = (r_mm - GRID_TIE_EPS) ** 2   # tie -> OPEN; twin in obstacle_cache

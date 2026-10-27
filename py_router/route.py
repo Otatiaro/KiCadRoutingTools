@@ -110,6 +110,16 @@ import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY bef
 from grid_router import GridObstacleMap, GridRouter
 
 
+def _held_plated_floor(config):
+    """The copper-to-hole floor the run's obstacle map HELD at via drills and
+    plated barrels (``config.plated_hole_clearance``), for the in-run project
+    sync: None when it does not exceed the copper clearance, which the sync
+    then writes as before. ``main()``'s writeback lowers it further, to what
+    the step's own copper needs (``step_hole_clearance``)."""
+    hc = getattr(config, 'plated_hole_clearance', 0.0) or 0.0
+    return float(hc) if hc > (config.clearance or 0.0) else None
+
+
 def _compute_stale_input_copper(orig_by_net, scope_ids, final_copper,
                                 emitted_copper, full_sig, pos_sig,
                                 final_ids=None):
@@ -5595,6 +5605,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         from fix_kicad_drc_settings import apply_routed_floors
                         apply_routed_floors(_staged,
                                             clearance=config.clearance,
+                                            hole_clearance=_held_plated_floor(config),
                                             edge_clearance=config.board_edge_clearance,
                                             clamp_nondefault_netclasses=False)
                     except Exception as _e650:
@@ -6693,6 +6704,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     from fix_kicad_drc_settings import apply_routed_floors
                     apply_routed_floors(output_file,
                                         clearance=config.clearance,
+                                        hole_clearance=_held_plated_floor(config),
                                         edge_clearance=config.board_edge_clearance,
                                         clamp_nondefault_netclasses=False,
                                         verbose=True)
@@ -10308,10 +10320,20 @@ For differential pair routing, use route_diff.py:
             if eff_clearance < args.clearance:
                 print(f"  Min clearance used: {eff_clearance:.4g} mm "
                       f"(below nominal {args.clearance:.4g}) - grading at this floor")
-            from fix_kicad_drc_settings import fix_project_for_output, drc_fix_kwargs
+            from fix_kicad_drc_settings import (fix_project_for_output, drc_fix_kwargs,
+                                                step_hole_clearance)
+            # The copper-to-hole floor this step HELD -- the router keeps
+            # copper off NPTH walls, via drills and plated barrels at the
+            # board's own min_hole_clearance -- lowered only to what its own
+            # copper needs, as route_diff.py writes it (#1369). Writing the
+            # copper clearance instead erased the declaration for every
+            # later step and for KiCad's own DRC.
+            _hole_clr = step_hole_clearance(args.input_file, args.output_file,
+                                            eff_clearance)
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
-                clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
+                clearance=eff_clearance, hole_clearance=_hole_clr,
+                hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
                 **drc_fix_kwargs(args))
