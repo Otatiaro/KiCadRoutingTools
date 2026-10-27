@@ -2085,12 +2085,14 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     return res
 
 
-def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane_drop='auto'):
+def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane_drop='auto', stand_in=()):
     """The plan laid in ONE call of the under-pad engine's joint escape (py_router/bga_fanout/underpad.py,
     joint=True): the planned moves on their own legs and the straps first, each net held to its layers (the bus to
     its routing layers, the others to `other_layers`) and the bus first; then the balls the plan could not place, by the under-pad
     grid's generic phases; the plane balls dropped (`plane_drop` auto: every net the call leaves out that owns a zone
-    or six balls; 'off': none). Returns (tracks, vias, failed nets)."""
+    or six balls; 'off': none). `stand_in`: vias to come (fanout_from_plan's tie vias), on the engine's board as its
+    own nets' copper -- not written -- so its rescues leave their sites as the plan does. Returns (tracks, vias, failed
+    nets)."""
     import shutil
     from kicad_parser import parse_kicad_pcb
     from kicad_writer import add_tracks_and_vias_to_pcb
@@ -2123,6 +2125,10 @@ def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane
     # the bus step in the chain and moves them off this copper (geometry.immovable_foreign_pads) -- until it has, once
     # (passives_fixed): every foreign pad then one a via clears
     pcb = parse_kicad_pcb(board)
+    # (the plan left room for the stand-ins, the engine's own rescues did not: a ball the plan-follow left unescaped was
+    # rescued by evicting a clock pair's leg and re-escaping it at the fab floor across its partner's tie site, and the
+    # termination under the partner's ball was left open)
+    pcb.vias.extend(stand_in)
     if passives_fixed():
         pcb._fanout_all_foreign_immovable = True
     spec = {'net_layers': {**{n: bus_route_layers(pcb) for n in bus}, **{n: list(other_layers) for n in others}},
@@ -2486,7 +2492,7 @@ def fan_array(board, out, ref, bus, others, other_layers, far=None, prefer=None,
             # (the plan alone drops the plane balls: the engine's own drop pass after it, blind to the bus's lanes, laid
             # one the plan had refused -- zynq U2's A8, half a pitch off its edge between two berths' lanes)
             with contextlib.redirect_stdout(sys.stderr):
-                lay(board, laid, ref, bus, lay_others, other_layers, hints, plane_drop='off')
+                lay(board, laid, ref, bus, lay_others, other_layers, hints, plane_drop='off', stand_in=stand_in)
             und = undropped_balls(laid, ref, drops, r.fan_track) if drops else []
             undropped = len(und)
             bare = bare_balls(laid, ref, list(bus) + list(others), r.fan_track)

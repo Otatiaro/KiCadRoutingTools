@@ -446,7 +446,12 @@ destination (`joint_berths`, `joint_destination`) see those sites as vias of
 their nets, the ends' menus drop another net's berth that runs or stands on
 one, and the tie itself is not laid on another net's track. Unseen,
 zynq7020_som's DDR_CK_P escaped along its ball row across DDR_CK_N's ball, the
-tie via was laid on that run, and the bus handed on a short. The resistor's
+tie via was laid on that run, and the bus handed on a short. The engine that
+lays the plan gets the sites too (`joint_escape.lay`'s `stand_in`: its nets'
+vias on the board it lays on, never written): its own rescues know no plan --
+a ball the plan-follow left unescaped was rescued by evicting a clock pair's
+leg and escaping both again at the fab floor, across the partner's tie site,
+and the termination under the partner's ball was left open. The resistor's
 place is the design's: it is none of the movable passives the plans lay
 through, and the cap step leaves it where it is (`joint_escape.tied_passives`,
 a passive with a signal pad of the run's nets under one of its balls). Moved,
