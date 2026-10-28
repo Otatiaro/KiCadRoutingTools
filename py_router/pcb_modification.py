@@ -5353,7 +5353,8 @@ def make_segment_clears(pcb_data: PCBData, config=None, clearance: float = 0.1,
         d = min(pd,
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff,
-                                      track_clearances=_trk_clr),  # dru track rules
+                                      track_clearances=_trk_clr,  # dru track rules
+                                      exact=True),  # admits new copper (#1318)
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
@@ -5531,10 +5532,14 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     # This pass edits copper only by SPLICING pcb_data.segments, and drops
     # the foreign-segment cache at every splice below, so between its own
     # invalidations the cache is trusted (no per-query O(segments) digest,
-    # see _foreign_seg_arrays); the flag is cleared on every exit path.
+    # see _foreign_seg_arrays); the flag is cleared on every exit path. It
+    # never touches pads, so the pad and hole caches, rebuilt once here, are
+    # trusted too (no per-query pad count).
     _trust_prev = getattr(pcb_data, '_foreign_seg_arr_trust', False)
-    if hasattr(pcb_data, '_foreign_seg_arr_cache'):
-        pcb_data._foreign_seg_arr_cache = None
+    for _c in ('_foreign_seg_arr_cache', '_foreign_pad_arr_cache',
+               '_foreign_hole_cap_cache'):
+        if hasattr(pcb_data, _c):
+            setattr(pcb_data, _c, None)
     pcb_data._foreign_seg_arr_trust = True
     try:
         for net_id in sorted(segs_by_net.keys()):
