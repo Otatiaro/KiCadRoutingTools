@@ -1142,6 +1142,13 @@ def repair_planes(
     # repairs). Same precedence as the layer map above.
     install_track_clearances(config, track_clearances, input_file, pcb_data,
                              routed_net_ids=net_ids)
+    # The board's net-pair and pad hole-clearance rules (dru_copper_rules),
+    # for the tap via map and the reconnect routes. A PCBData a route step
+    # already attached them to (the in-run finalize, whose output has no
+    # .kicad_dru yet) keeps its own.
+    _copper_rules = getattr(getattr(config, 'rules', None), 'copper_rules', None)
+    if _copper_rules and not getattr(pcb_data, '_dru_copper_rules', None):
+        pcb_data._dru_copper_rules = list(_copper_rules)
 
     # Cross-class clearance (#434): the repair step's own copper (region joins,
     # pad taps) and its ripped-blocker reconnects were priced at the uniform
