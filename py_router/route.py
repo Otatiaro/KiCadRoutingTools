@@ -2214,6 +2214,237 @@ def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
         print(f"  (late orphan sweep skipped: {_e})")
 
 
+def _net_ids_named(items, keys=('net_id', 'p_net_id', 'n_net_id')) -> Set[int]:
+    """The net ids a change-set record list mentions (pad swaps, target
+    swaps, segment layer modifications)."""
+    out = set()
+    for it in items or ():
+        if isinstance(it, dict):
+            for k in keys:
+                if isinstance(it.get(k), int):
+                    out.add(it[k])
+    return out
+
+
+def _pad_sites(pcb) -> Dict[str, list]:
+    """{net name: its pads' sites} -- whether a net's pads changed."""
+    out: Dict[str, list] = {}
+    for nid, pads in (pcb.pads_by_net or {}).items():
+        net = pcb.nets.get(nid)
+        if net is None:
+            continue
+        out[net.name] = sorted((round(p.global_x, 4), round(p.global_y, 4),
+                                tuple(p.layers or ())) for p in pads or ())
+    return out
+
+
+def _late_victim_guard(pcb_data, config, input_file, output_file,
+                       return_results, results_data, write_model,
+                       orig_copper, partner_of):
+    """The victim guard on the board this run SHIPS (victim_guard.py): every
+    net the run left less connected than it got it returns to its input
+    copper, with the nets whose new copper holds that copper's corridor.
+
+    After the last pass that changes copper and before the #962 via stamp,
+    the #1069 re-grade and the #600 gate, so all of them read the guarded
+    board. Both fronts: the CLI rewrites the written file with the input
+    file's own blocks, the GUI edits the change-set the applier reads. Each
+    applies, re-grades and checks that the restored nets carry exactly their
+    input copper and that the board has no damage the guard did not leave;
+    otherwise it puts the board back and leaves the verdict to the gate.
+
+    Returns {'restored': [names], 'victims': [names], 'refused': {victim:
+    frozen net}} or None when there was nothing to do.
+    """
+    from improvement_gate import copper_signature
+    from plane_fill_model import CopperView
+    from victim_guard import (connectivity_of, damaged_nets, restore_closure,
+                              remap_copper, restore_input_copper_text)
+    name_of = {nid: n.name for nid, n in pcb_data.nets.items()}
+    id_of = {nm: nid for nid, nm in name_of.items()}
+
+    def _changed(sig_a, sig_b):
+        return {id_of[nm] for nm in set(sig_a) | set(sig_b)
+                if nm in id_of and sig_a.get(nm) != sig_b.get(nm)}
+
+    def _by_net(segs, vias):
+        d: Dict[int, Tuple[list, list]] = {}
+        for s in segs:
+            d.setdefault(s.net_id, ([], []))[0].append(s)
+        for v in vias:
+            d.setdefault(v.net_id, ([], []))[1].append(v)
+        return d
+
+    if return_results:
+        rd = results_data
+        if rd is None or orig_copper is None:
+            return None
+        in_segs, in_vias = orig_copper
+        before_view = CopperView(pcb_data, in_segs, in_vias)
+
+        def _after_view():
+            _as, _av = write_model(rd)
+            return CopperView(pcb_data, [s for _l in _as.values() for s in _l],
+                              [v for _l in _av.values() for v in _l])
+        after_view = _after_view()
+        frozen = {z.net_id for z in pour_zones(pcb_data.zones)}
+        frozen |= _net_ids_named(rd.get('pad_swaps'))
+        frozen |= _net_ids_named(rd.get('single_ended_target_swap_info'))
+        frozen |= _net_ids_named(rd.get('all_segment_modifications'))
+        _moved = {m.get('reference') for m in
+                  (getattr(pcb_data, '_pending_cap_moves', None) or [])}
+        frozen |= {p.net_id for _l in (pcb_data.pads_by_net or {}).values()
+                   for p in _l or () if p.component_ref in _moved}
+        input_copper = _by_net(in_segs, in_vias)
+        in_sig = copper_signature(in_segs, in_vias, name_of.get)
+        scope = _changed(in_sig, copper_signature(
+            after_view.segments, after_view.vias, name_of.get)) - frozen
+        before_map = connectivity_of(before_view, scope)
+        after_map = connectivity_of(after_view, scope)
+
+        def _grade_after(ids):
+            return connectivity_of(_after_view(), ids)
+    else:
+        if not (input_file and output_file and os.path.isfile(input_file)
+                and os.path.isfile(output_file)
+                and os.path.abspath(input_file) != os.path.abspath(output_file)):
+            return None
+        before_pcb = parse_kicad_pcb(input_file)
+        after_pcb = parse_kicad_pcb(output_file)
+        b_name = {nid: n.name for nid, n in before_pcb.nets.items()}
+        a_name = {nid: n.name for nid, n in after_pcb.nets.items()}
+        # One numbering for the whole guard: pcb_data's, which the pairwise
+        # clearances of `config` are keyed by.
+        after_view = copy.copy(pcb_data)
+        after_view.segments = remap_copper(after_pcb.segments, id_of, a_name.get)
+        after_view.vias = remap_copper(after_pcb.vias, id_of, a_name.get)
+        in_segs = remap_copper(before_pcb.segments, id_of, b_name.get)
+        in_vias = remap_copper(before_pcb.vias, id_of, b_name.get)
+
+        def _grade(pcb, names, ids):
+            # pcb_data's ids -> this parse's, graded, and back.
+            own = {nm: nid for nid, nm in names.items()}
+            local = {own[name_of[i]]: i for i in ids
+                     if name_of.get(i) in own}
+            return {local[n]: v
+                    for n, v in connectivity_of(pcb, set(local)).items()}
+
+        def _grade_after(ids):
+            pcb = parse_kicad_pcb(output_file)
+            return _grade(pcb, {nid: n.name for nid, n in pcb.nets.items()},
+                          ids)
+        frozen = {id_of[a_name[z.net_id]] for z in pour_zones(after_pcb.zones)
+                  if a_name.get(z.net_id) in id_of}
+        frozen |= {id_of[b_name[z.net_id]] for z in pour_zones(before_pcb.zones)
+                   if b_name.get(z.net_id) in id_of}
+        b_pads, a_pads = _pad_sites(before_pcb), _pad_sites(after_pcb)
+        frozen |= {id_of[nm] for nm in set(b_pads) | set(a_pads)
+                   if nm in id_of and b_pads.get(nm) != a_pads.get(nm)}
+        input_copper = _by_net(in_segs, in_vias)
+        in_sig = copper_signature(before_pcb.segments, before_pcb.vias,
+                                  b_name.get)
+        scope = _changed(in_sig, copper_signature(
+            after_pcb.segments, after_pcb.vias, a_name.get)) - frozen
+        before_map = _grade(before_pcb, b_name, scope)
+        after_map = _grade(after_pcb, a_name, scope)
+
+    victims = [n for n in damaged_nets(before_map, after_map)
+               if n not in frozen]
+    if not victims:
+        return None
+    restore, refused = restore_closure(victims, input_copper, after_view,
+                                       config.clearance, config=config,
+                                       frozen=frozen, partner_of=partner_of)
+    report = {'victims': sorted(name_of.get(n, str(n)) for n in victims),
+              'restored': sorted(name_of.get(n, str(n)) for n in restore),
+              'refused': {name_of.get(v, str(v)): name_of.get(b, str(b))
+                          for v, b in sorted(refused.items())}}
+    for v, b in sorted(refused.items()):
+        print(f"  Victim guard: {name_of.get(v, v)} ships broken -- returning "
+              f"it to its input copper would also return "
+              f"{name_of.get(b, b)}, whose pads or pour this run changed; "
+              f"the improvement gate judges it")
+    if not restore:
+        return report
+    names = {name_of[n] for n in restore if n in name_of}
+    # The pours, graded on the board as routed: restored copper must not cut
+    # one the run left whole.
+    pours = {n for n in frozen if n in name_of and any(
+        z.net_id == n for z in pour_zones(pcb_data.zones))}
+    pour_map = _grade_after(pours) if pours else {}
+
+    if return_results:
+        snap = _verified_pour_snapshot(pcb_data, None, rd)
+        for r in rd.get('results') or []:
+            for key in ('new_segments', 'new_vias'):
+                if r.get(key):
+                    r[key] = [x for x in r[key] if x.net_id not in restore]
+        for key in ('all_swap_segments', 'all_swap_vias',
+                    'segments_to_remove', 'vias_to_remove'):
+            if rd.get(key):
+                rd[key] = [x for x in rd[key] if x.net_id not in restore]
+        pcb_data.segments = ([s for s in pcb_data.segments
+                              if s.net_id not in restore]
+                             + [copy.copy(s) for s in in_segs
+                                if s.net_id in restore])
+        pcb_data.vias = ([v for v in pcb_data.vias if v.net_id not in restore]
+                         + [copy.copy(v) for v in in_vias
+                            if v.net_id in restore])
+        bump_copper_epoch(pcb_data)
+        check_view = _after_view()
+        out_sig = copper_signature(check_view.segments, check_view.vias,
+                                   name_of.get)
+        undo = lambda: _verified_pour_restore(snap, pcb_data, None, rd)  # noqa: E731
+        removed = added = None
+    else:
+        with open(output_file, 'r', encoding='utf-8') as fh:
+            shipped = fh.read()
+        with open(input_file, 'r', encoding='utf-8') as fh:
+            source = fh.read()
+        text, removed, added = restore_input_copper_text(
+            shipped, source, names, a_name, b_name)
+        with open(output_file, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        check_pcb = parse_kicad_pcb(output_file)
+        c_name = {nid: n.name for nid, n in check_pcb.nets.items()}
+        out_sig = copper_signature(check_pcb.segments, check_pcb.vias,
+                                   c_name.get)
+
+        def undo():
+            with open(output_file, 'w', encoding='utf-8') as fh:
+                fh.write(shipped)
+
+    wrong_copper = sorted(nm for nm in names if out_sig.get(nm) != in_sig.get(nm))
+    check_map = _grade_after(restore | pours)
+    new_damage = sorted(name_of.get(n, str(n)) for n in
+                        set(damaged_nets(before_map,
+                                         {n: check_map[n] for n in restore
+                                          if n in check_map}))
+                        | set(damaged_nets(pour_map, check_map)))
+    if wrong_copper or new_damage:
+        undo()
+        print(f"  Victim guard: restore withdrawn -- "
+              + (f"copper of {', '.join(wrong_copper[:6])} did not come back "
+                 f"as the input had it" if wrong_copper else
+                 f"it would break {', '.join(new_damage[:6])}")
+              + "; the improvement gate judges the board as routed")
+        report['withdrawn'] = wrong_copper or new_damage
+        return report
+    back = sorted(name_of.get(n, str(n)) for n in restore if n in set(victims))
+    others = sorted(name_of.get(n, str(n)) for n in restore
+                    if n not in set(victims))
+    print(f"  Victim guard: {len(back)} net(s) this run had left broken "
+          f"returned to their input copper ({', '.join(back[:6])}"
+          + (f", +{len(back) - 6} more" if len(back) > 6 else "") + ")"
+          + (f"; {len(others)} net(s) whose new copper held their corridor "
+             f"returned to their input state too ({', '.join(others[:6])}"
+             + (f", +{len(others) - 6} more" if len(others) > 6 else "") + ")"
+             if others else "")
+          + (f" [{removed} block(s) out, {added} in]"
+             if removed is not None else ""))
+    return report
+
+
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
@@ -8670,6 +8901,30 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             pcb_data, output_file, return_results,
             locals().get('results_data'), _protect_unfinished,
             keep_input_copper, skip_routing)
+
+    # Victim guard: a net this run left less connected than it got it returns
+    # to its input copper, with every net whose new copper holds that copper's
+    # corridor (victim_guard.py). After the last pass that changes copper,
+    # before the #962 stamp, the #1069 re-grade and the #600 gate, so they all
+    # read the guarded board. Outermost run only, both fronts.
+    if (final_reconcile and not skip_routing and not _ckpt_stop and quick < 2
+            and env_knobs.VICTIM_GUARD and any(_orig_seg_by_net.values())):
+        try:
+            _partner_vg = {}
+            for _nid_vg, (_pn_vg, _pair_vg) in (
+                    getattr(state, 'diff_pair_by_net_id', None) or {}).items():
+                _partner_vg[_nid_vg] = (_pair_vg.n_net_id
+                                        if _nid_vg == _pair_vg.p_net_id
+                                        else _pair_vg.p_net_id)
+            _vg_report = _late_victim_guard(
+                pcb_data, config, input_file, output_file, return_results,
+                locals().get('results_data'), _gui_write_model,
+                _orig_copper_values, _partner_vg)
+            if (_vg_report is not None and return_results
+                    and locals().get('results_data') is not None):
+                results_data['victim_guard'] = _vg_report
+        except Exception as _vge:                               # noqa: BLE001
+            print(f"  (victim guard skipped: {type(_vge).__name__}: {_vge})")
 
     # #962: declare Type VII on every via this run put in a pad or a paste
     # opening. It runs HERE because this is after the last pass that adds or

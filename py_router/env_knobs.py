@@ -411,6 +411,11 @@ def refresh() -> None:
     # are REQUEUED rather than dropped, so it is a re-run of the exchange rather
     # than a reversal of it. KICAD_VICTIM_RESTORE=0 reverts.
     g['VICTIM_RESTORE'] = _on_default('KICAD_VICTIM_RESTORE')
+    # Victim guard (victim_guard.py): at the end of the outermost run, every
+    # net left less connected than the input had it returns to its input
+    # copper, with the nets whose new copper holds its corridor, so no net
+    # ships worse than it came in. KICAD_VICTIM_GUARD=0 reverts.
+    g['VICTIM_GUARD'] = _on_default('KICAD_VICTIM_GUARD')
     # #622 pocket-stuck rip targeting (ported from bus622-take2 947698d6): when
     # one A* direction exhausts at <=20% of the other side's iterations, the rip
     # ladder re-analyzes THAT direction's blocked cells alone. The union let the
