@@ -192,6 +192,17 @@ class RoutingBoard:
             % (x, y, size, drill, ' (locked yes)' if locked else '',
                self.net(net), uid or self._uid()))
 
+    def zone(self, layer, x0, y0, x1, y1, net, clearance=0.2):
+        """A rectangular, unfilled pour of `net` on `layer`."""
+        n = self.net(net)
+        self.items.append(
+            '  (zone (net %d) (net_name "%s") (layer "%s") (uuid "%s") '
+            '(hatch edge 0.5) (connect_pads (clearance %s)) (min_thickness 0.2) '
+            '(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.3)) '
+            '(polygon (pts (xy %s %s) (xy %s %s) (xy %s %s) (xy %s %s))))'
+            % (n, net, layer, self._uid(), clearance,
+               x0, y0, x1, y0, x1, y1, x0, y1))
+
     def ring(self, pts, net, w=0.2, layer='F.Cu', locked=False):
         for (x1, y1), (x2, y2) in zip(pts, list(pts[1:]) + [pts[0]]):
             self.seg(x1, y1, x2, y2, net, w=w, layer=layer, locked=locked)

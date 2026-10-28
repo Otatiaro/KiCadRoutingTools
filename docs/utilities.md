@@ -2534,8 +2534,8 @@ signal nets with loops: 116; total independent loops: 615; nets with overlapping
 copper components for the net (should be 1 for a fully-routed net). On the
 nets a `route.py` run cleans, its post-route cleanup removes redundant loops
 itself (`prune_redundant_cycles`, then `collapse_strict_redundant`, #1063);
-`check_weird.py` grades the same redundancy per segment (`redundant-cycle`,
-`removable-segment`).
+`check_weird.py` grades the same redundancy (`redundant-cycle`, one finding per
+loop branch, and `removable-segment`).
 
 ## Copper Hygiene Checker (`check_weird.py`)
 
@@ -2547,7 +2547,8 @@ category each:
 - `soft-joint` -- near-open joints: same-net segments that overlap by their end
   caps instead of meeting endpoint-to-endpoint, and meet nowhere else (two stubs
   leaving one vertex are not one, #984);
-- `redundant-cycle` -- copper loops whose edges can go without changing
+- `redundant-cycle` -- copper loops (one finding per branch the pruner would
+  drop, loops through a pad and on zoned nets included) that can go without changing
   connectivity;
 - `removable-segment` -- copper that can be deleted without disconnecting the
   net (below);
