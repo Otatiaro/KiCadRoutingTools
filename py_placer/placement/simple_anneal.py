@@ -996,7 +996,8 @@ class Annealer:
         model.restore(snap)
         return dc
 
-    def start_temperature(self, samples: int = 200) -> float:
+    def start_temperature(self, samples: int = 200, accept: float = ACCEPT,
+                          reach_scale: float = 1.0) -> float:
         """T at which a move changing the cost by the median amount, either
         way, is taken with probability `ACCEPT` uphill. The overlap is left
         out: from a scatter most moves lower it."""
@@ -1004,7 +1005,7 @@ class Annealer:
         for _ in range(samples):
             r = self.rng.choice(self.mov)
             x, y, rot = self.pose(r)
-            reach = self.span / 6.0
+            reach = self.span / 6.0 * reach_scale
             pose = (x + self.rng.uniform(-reach, reach), y + self.rng.uniform(-reach, reach), rot)
             if r in self.seats:
                 pose = project(self.seats[r], pose, rot)
@@ -1014,7 +1015,7 @@ class Annealer:
         if not ds:
             return 1.0
         ds.sort()
-        return ds[len(ds) // 2] / -math.log(ACCEPT)
+        return ds[len(ds) // 2] / -math.log(accept)
 
     def repair(self, T: float) -> float:
         """A run that never came clean, mended where it stands: up to
@@ -1201,7 +1202,8 @@ def scatter(model, movable: List[str], seed: int = 0, clustered: bool = False,
 
 
 def anneal(model, movable: List[str], *, moves: int = 11000,
-           seed: int = 0, log=None, repair: bool = False, seats=None) -> Dict:
+           seed: int = 0, log=None, repair: bool = False, seats=None,
+           accept: float = ACCEPT, reach_scale: float = 1.0) -> Dict:
     """Anneal from the live poses and leave the best overlap-free placement
     seen applied, each part then held to the exact legality. With `repair`,
     a run that never came clean is first mended where it stands
@@ -1220,9 +1222,9 @@ def anneal(model, movable: List[str], *, moves: int = 11000,
     t_start = time.time()
     model.reprice_all()         # parts may have moved outside the model
     model.total()               # ... and the index and grids with them
-    t0 = a.start_temperature()
+    t0 = a.start_temperature(accept=accept, reach_scale=reach_scale)
     kinds = a.kinds()
-    reach0 = a.span / 6.0
+    reach0 = a.span / 6.0 * reach_scale
     late = int(BIG_UNTIL * moves)       # from here no group turns or swaps
     run = {'done': 0}                   # moves executed
     stats = {k: [0, 0] for k in kinds}

@@ -113,9 +113,18 @@ PAD_REACH_WARN_MM = 0.3
 #: seeds on two (covg blocking 3.1 -> 0.1, bitaxe) and worse on three (tigard,
 #: argus, librevna), so the default has none.
 ANCHORED_SEEDS = 0
+#: Forced seeds (`--forced`) are opt-in, numbered after the anchored ones:
+#: each starts from a force-directed global placement (`placement/force.py`)
+#: and anneals from there at a lower temperature and a shorter reach
+#: (FORCED_ACCEPT, FORCED_REACH), so the anneal refines the spread start
+#: instead of rebuilding it.
+FORCED_SEEDS = 0
+FORCED_ACCEPT = 0.02
+FORCED_REACH = 0.25
 
 import argparse
 import json
+import math
 import os
 import shutil
 import sys
@@ -466,7 +475,7 @@ def _many_seeds(ap, a):
               file=sys.stderr)
         return 2
     skip = {'help', 'board', 'out', 'seed', 'seeds', 'jobs', 'json',
-            'scattered', 'clustered', 'anchored', 'judge'}
+            'scattered', 'clustered', 'anchored', 'forced', 'judge'}
     passed = []
     for act in ap._actions:
         if act.dest in skip or not act.option_strings:
@@ -475,6 +484,12 @@ def _many_seeds(ap, a):
         if act.nargs == 0:      # a switch: its name alone
             if val:
                 passed.append(act.option_strings[0])
+        elif isinstance(val, list):     # repeated (append) or several values (nargs)
+            if act.nargs in ('+', '*'):
+                passed += [act.option_strings[0]] + [str(v) for v in val]
+            else:
+                for v in val:
+                    passed += [act.option_strings[0], str(v)]
         elif val is not None:
             passed += [act.option_strings[0], str(val)]
     jobs = max(1, a.jobs or min(len(seeds), 4))
@@ -531,7 +546,7 @@ def _many_seeds(ap, a):
                                         *(f"{r['outer']} {r['face']} part(s) in {r['bga']}'s "
                                           f"outer rows" for r in summary.get('bga_field') or ()
                                           if r['outer'])) if t)
-            print(f"  seed {s}{f' ({start})' if start in ('clustered', 'anchored') else ''}: "
+            print(f"  seed {s}{f' ({start})' if start in ('clustered', 'anchored', 'forced') else ''}: "
                   f"cost {fin['cost']:.1f}, {summary['moves']} moves in "
                   f"{summary['seconds']['anneal']} s"
                   + (f", no legal pose for {', '.join(ill)}" if ill else '')
@@ -586,9 +601,10 @@ def _name_judged(a, seeds, summaries):
     judge = judge_order({s: summaries[s] for s in seeds if s in summaries})[:a.judge]
     doc = {'judge': judge,
            'scattered': [s for s in seeds if summaries.get(s, {}).get('start')
-                         not in ('clustered', 'anchored')],
+                         not in ('clustered', 'anchored', 'forced')],
            'clustered': [s for s in seeds if summaries.get(s, {}).get('start') == 'clustered'],
            'anchored': [s for s in seeds if summaries.get(s, {}).get('start') == 'anchored'],
+           'forced': [s for s in seeds if summaries.get(s, {}).get('start') == 'forced'],
            'illegal': [s for s in seeds if summaries.get(s, {}).get('illegal')],
            # the declared poses refused, the same in every seed: the
            # intent's to fix, not a seed's
@@ -736,6 +752,24 @@ def build_parser():
                          "group gathered round the point its wiring prefers (a quick "
                          "least-squares solve toward the fixed parts and groups it is "
                          "wired to, re-weighted and jittered per seed)")
+    ap.add_argument('--forced-seeds', metavar='LIST',
+                    help="the seeds, listed as --seeds lists them, that start from a "
+                         "force-directed placement (placement/force.py: nets pull, pads "
+                         "repel at short range, an electrostatic density spreads the parts "
+                         "over the free board) and anneal from it at a lower temperature")
+    ap.add_argument('--force-param', metavar='KEY=VALUE', action='append',
+                    help="a forced start's setting (placement/force.py ForceParams: "
+                         "attraction, repulsion, bin_mm, lambda_rate, ...), repeatable")
+    ap.add_argument('--snapshot-every', type=int, metavar='N',
+                    help="a forced start: a snapshot every N steps (and at each phase change, "
+                         "each swap taken, before and after the legalization) into "
+                         "--snapshot-dir, then a film of them")
+    ap.add_argument('--snapshot-dir', metavar='DIR',
+                    help="where a forced start's snapshots go (s<seed>/ per seed, and "
+                         "s<seed>.mp4 or .gif); off by default")
+    ap.add_argument('--plane-nets', metavar='NET', nargs='+',
+                    help="nets poured as planes, beyond ground and the rails: in a forced "
+                         "start they pull nothing and each of their pads asks room for a via")
     ap.add_argument('--scattered', type=int,
                     help=f'with an OUT carrying {{seed}} and no seed named, the seeds '
                          f'started scattered, numbered from 0 (default {SCATTERED_SEEDS})')
@@ -745,6 +779,9 @@ def build_parser():
     ap.add_argument('--anchored', type=int,
                     help=f'likewise, the seeds started anchored, after the clustered ones '
                          f'(default {ANCHORED_SEEDS}: opt-in)')
+    ap.add_argument('--forced', type=int,
+                    help=f'likewise, the seeds started forced, after the anchored ones '
+                         f'(default {FORCED_SEEDS}: opt-in)')
     ap.add_argument('--judge', type=int, default=JUDGED_SEEDS,
                     help=f'in a run of several seeds, how many legal seeds to name for a '
                          f'judging route, printed and written to judge.json beside the '
@@ -762,27 +799,42 @@ def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
     starts = [f for f, v in (('--scattered', a.scattered), ('--clustered', a.clustered),
-                             ('--anchored', a.anchored)) if v is not None]
+                             ('--anchored', a.anchored), ('--forced', a.forced))
+              if v is not None]
     if a.seed is None and not a.seeds and '{seed}' in a.out:
-        if a.clustered_seeds or a.anchored_seeds:
+        if a.clustered_seeds or a.anchored_seeds or a.forced_seeds:
             print("place_simple: the default seeds number their own starts; name the seeds "
-                  "with --seeds to use --clustered-seeds or --anchored-seeds", file=sys.stderr)
+                  "with --seeds to use --clustered-seeds, --anchored-seeds or --forced-seeds",
+                  file=sys.stderr)
             return 2
         sc = SCATTERED_SEEDS if a.scattered is None else a.scattered
         cl = CLUSTERED_SEEDS if a.clustered is None else a.clustered
         an = ANCHORED_SEEDS if a.anchored is None else a.anchored
-        n = sc + cl + an
-        if min(sc, cl, an) < 0 or n < 1:
-            print("place_simple: --scattered, --clustered and --anchored must be 0 or more, "
-                  "with at least one seed", file=sys.stderr)
+        fo = FORCED_SEEDS if a.forced is None else a.forced
+        n = sc + cl + an + fo
+        if min(sc, cl, an, fo) < 0 or n < 1:
+            print("place_simple: --scattered, --clustered, --anchored and --forced must be 0 "
+                  "or more, with at least one seed", file=sys.stderr)
             return 2
         a.seeds = f'0-{n - 1}'
         a.clustered_seeds = f'{sc}-{sc + cl - 1}' if cl else None
-        a.anchored_seeds = f'{sc + cl}-{n - 1}' if an else None
+        a.anchored_seeds = f'{sc + cl}-{sc + cl + an - 1}' if an else None
+        a.forced_seeds = f'{sc + cl + an}-{n - 1}' if fo else None
     elif starts:
         print(f"place_simple: {', '.join(starts)} set the default seeds of an OUT carrying "
-              "{seed}; with --seed or --seeds, list the starts with --clustered-seeds and "
-              "--anchored-seeds", file=sys.stderr)
+              "{seed}; with --seed or --seeds, list the starts with --clustered-seeds, "
+              "--anchored-seeds and --forced-seeds", file=sys.stderr)
+        return 2
+    from placement.force import ForceParams
+    force_params = ForceParams()
+    try:
+        for kv in a.force_param or ():
+            key, eq, val = kv.partition('=')
+            if not eq:
+                raise ValueError(f"{kv!r} is not KEY=VALUE")
+            force_params.set(key.strip(), val.strip())
+    except ValueError as ex:
+        print(f"place_simple: --force-param: {ex}", file=sys.stderr)
         return 2
     if a.judge < 0:
         print("place_simple: --judge must be 0 or more", file=sys.stderr)
@@ -796,9 +848,11 @@ def main(argv=None):
     try:
         clustered = a.seed in _seed_list(a.clustered_seeds or '')
         anchored = a.seed in _seed_list(a.anchored_seeds or '')
+        forced = a.seed in _seed_list(a.forced_seeds or '')
     except ValueError:
-        print(f"place_simple: --clustered-seeds {a.clustered_seeds!r} or --anchored-seeds "
-              f"{a.anchored_seeds!r} is not a list like 0-3 or 0,1,2,3", file=sys.stderr)
+        print(f"place_simple: --clustered-seeds {a.clustered_seeds!r}, --anchored-seeds "
+              f"{a.anchored_seeds!r} or --forced-seeds {a.forced_seeds!r} is not a list "
+              f"like 0-3 or 0,1,2,3", file=sys.stderr)
         return 2
     if a.seeds:
         return _many_seeds(ap, a)
@@ -972,11 +1026,43 @@ def main(argv=None):
         for k in range(RESTARTS + 1):
             # a restart's own stream, distinct from every other seed's first run
             seed = a.seed if k == 0 else (a.seed + 1) * 1000003 + k
-            simple_anneal.scatter(mdl, movable, seed=seed, clustered=clustered,
-                                  anchored=anchored)
+            warm = {}
+            if forced:
+                from placement import force
+                film = None
+                if a.snapshot_dir:
+                    from placement.force_film import Snapshots
+                    film = Snapshots(src, os.path.join(a.snapshot_dir, f"s{a.seed}"
+                                                       + (f"_run{k + 1}" if k else '')),
+                                     groups=a.groups, intent=a.intent)
+                    films.append(film)
+                force_params.snapshot_every = a.snapshot_every or 0
+                got = force.place(mdl, movable, seed=seed, params=force_params,
+                                  plane_nets=plane_ids, log=lambda s: print(f"  {s}"),
+                                  snapshot=film)
+                force_runs.append(got)
+                t = got.get('terms') or {}
+                print(f"  force: {got['steps']} steps in {got.get('seconds', 0)} s "
+                      f"({got.get('ms_per_step')} ms a step), overflow {got.get('overflow')}, "
+                      f"courtyard overlap {t.get('overlap_mm2', 0):.2f} mm2 in "
+                      f"{int(t.get('overlap_pairs', 0))} pair(s) before the legalization")
+                at_force = {r: (st.parts[r].x, st.parts[r].y) for r in movable}
+                warm = {'accept': FORCED_ACCEPT, 'reach_scale': FORCED_REACH}
+            else:
+                simple_anneal.scatter(mdl, movable, seed=seed, clustered=clustered,
+                                      anchored=anchored)
             res = simple_anneal.anneal(mdl, movable, moves=moves, seed=seed,
                                        log=lambda s: print(f"  {s}"),
-                                       repair=k == RESTARTS, seats=mdl.edge_seats)
+                                       repair=k == RESTARTS, seats=mdl.edge_seats, **warm)
+            if forced:
+                # how far the anneal and the legality pass moved the forced start
+                d = [math.hypot(st.parts[r].x - at_force[r][0], st.parts[r].y - at_force[r][1])
+                     for r in movable]
+                got['legalize_shift_mm'] = {'total': round(sum(d), 1),
+                                            'mean': round(sum(d) / max(1, len(d)), 3),
+                                            'max': round(max(d, default=0.0), 2)}
+                print(f"  legalization moved the forced start {sum(d):.1f} mm in all "
+                      f"(mean {sum(d) / max(1, len(d)):.2f}, most {max(d, default=0.0):.2f})")
             illegal = [r for r in movable if not ok(r, st, mdl)]
             if kept is None or len(illegal) < len(kept[0]):
                 kept = (illegal, {r: (st.parts[r].x, st.parts[r].y, st.parts[r].rot)
@@ -987,6 +1073,12 @@ def main(argv=None):
                   + ("; annealing again from a fresh start" if k < RESTARTS else ""))
         return kept, k
     fallback = []           # parts seated on what the board draws instead (#1300)
+    force_runs = []         # each forced start's summary
+    films = []              # each forced start's snapshots
+    plane_ids = {n for n, net in pcb.nets.items() if net.name in set(a.plane_nets or ())}
+    unknown = sorted(set(a.plane_nets or ()) - {net.name for net in pcb.nets.values()})
+    if unknown:
+        print(f"  WARNING: --plane-nets names no net of the board: {', '.join(unknown)}")
     if not movable:
         print("place_simple: nothing to place; the board is written as it is")
         k, kept = -1, ([], {}, {'moves': 0, 'reseated': [], 'stats': {}})
@@ -1161,6 +1253,15 @@ def main(argv=None):
                   for r in movable]
     write_placed_output(src, a.out, placements)
     copy_siblings(a.board, a.out)
+    for film in films[-1:]:
+        film.still(a.out, 'after legalization')
+        made = film.film(os.path.join(a.snapshot_dir, f"s{a.seed}"))
+        print(f"  snapshots: {len(film.frames)} frame(s) in {film.out_dir}"
+              + (f", film {made}" if made else ''))
+        if force_runs:
+            force_runs[-1]['film'] = made
+    for film in films:
+        film.close()
     if tmp:
         shutil.rmtree(tmp, ignore_errors=True)
     # the placed board's floorplan, graded as the judge grades it (#1296):
@@ -1179,8 +1280,9 @@ def main(argv=None):
     final.pop('per_group', None)
     final.pop('per_hint', None)
     report = {'final': final, 'moves': res['moves'], 'seed': a.seed,
-              'start': ('anchored' if anchored else 'clustered' if clustered
-                        else 'scattered'), 'runs': k + 1,
+              'start': ('forced' if forced else 'anchored' if anchored
+                        else 'clustered' if clustered else 'scattered'), 'runs': k + 1,
+              'force': force_runs[-1] if force_runs else None,
               'declared': sorted(f['reference'] for f in flips),
               'reseated': res['reseated'], 'repaired': bool(res.get('repaired')),
               'illegal': illegal, 'tight': tight, 'refused': refused, 'estimate_fallback': fallback,

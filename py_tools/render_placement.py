@@ -1959,7 +1959,11 @@ def caption(spec: PanelSpec, extra: Optional[Dict] = None) -> str:
     return "  |  ".join(b for b in bits if b)
 
 
-def render_panel(spec: PanelSpec, *, size=1600, supersample=2, extra=None):
+def render_panel(spec: PanelSpec, *, size=1600, supersample=2, extra=None, overlays=(),
+                 top_overlays=()):
+    """One panel as an image. A caller's own layers, `fn(draw, renderer)`
+    drawn through `renderer.tf`: `overlays` under the placement (a density
+    map), `top_overlays` over it (force arrows)."""
     from route_render import BoardRenderer
     r = BoardRenderer(spec.model.pcb, size=size, supersample=supersample,
                       theme=(extra or {}).get('theme') if isinstance(extra, dict) else None,
@@ -1976,7 +1980,9 @@ def render_panel(spec: PanelSpec, *, size=1600, supersample=2, extra=None):
     if _plan is not None:
         import render_plan as _rp
         _ovs.append(_rp.plan_overlay(_plan, alpha=0.55))
+    _ovs.extend(overlays or ())
     _ovs.append(overlay_for(spec))
+    _ovs.extend(top_overlays or ())
     return r.frame(overlays=_ovs, label=caption(spec, extra))
 
 
@@ -2251,7 +2257,9 @@ def _load_summary(path):
     return m['failed_nets'], m['blockers'], m
 
 
-def main(argv=None):
+def main(argv=None, overlays=(), top_overlays=()):
+    """The CLI. `overlays` are drawn under the placement and `top_overlays`
+    over it (`render_panel`), for a caller rendering its own layers."""
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.board:
@@ -2626,7 +2634,7 @@ def main(argv=None):
     stem, ext = os.path.splitext(out)
     for i, spec in enumerate(panels):
         img = render_panel(spec, size=args.size, supersample=args.supersample,
-                           extra=extra)
+                           extra=extra, overlays=overlays, top_overlays=top_overlays)
         # The suffix must DISTINGUISH the panel, and it only knew about `side`
         # and the literal word "focus". So --pair with --flat gave both panels
         # an empty suffix and the AFTER silently overwrote the BEFORE (one file
