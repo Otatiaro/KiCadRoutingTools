@@ -471,6 +471,16 @@ src/
   longer needed. `single_ended_routing` uses it to run a connection's
   backward full search beside its forward one.
 
+### 0.24.1 (2026-10-28)
+- **Stub proximity stamped a disk at a time** (`obstacle_map.rs`,
+  `tiled.rs`): `add_stub_proximity_costs_batch` and `_grouped` compute
+  each falloff disk once per call, row by row, instead of a square root per
+  cell per stub, and stamp it with `CostGrid::raise_row` (one tile lookup
+  per tile a row crosses; a tile is created or copied only where a cell
+  rises). A group's field is a cost grid instead of a hash map. Same f32
+  expression, same integers: 2000 stubs of radius 40, 102 -> 18 ms (660 ms
+  on 0.23.7); grouped, 400 groups, 117 -> 70 ms (209 ms on 0.23.7).
+
 ### 0.24.0 (2026-10-28)
 - **Obstacle map in copy-on-write tiles** (`tiled.rs`, `obstacle_map.rs`):
   the counted blocked cells and vias (every via rung) and the stub and
