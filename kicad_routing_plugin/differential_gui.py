@@ -1553,7 +1553,7 @@ class DifferentialTab(wx.Panel):
 
     def _held_hole_clearance(self, board, results_data, clearance):
         """gui_utils.held_hole_clearance_for_results on this tab's PCBData."""
-        from gui_utils import held_hole_clearance_for_results
+        from .gui_utils import held_hole_clearance_for_results
         return held_hole_clearance_for_results(self.pcb_data, board, results_data,
                                                clearance)
 

@@ -4347,7 +4347,7 @@ class RoutingDialog(wx.Dialog):
                 # The copper-to-hole floor the run held (NPTH walls, via drills,
                 # plated barrels), lowered only to what its own copper needs --
                 # route.py's step_hole_clearance, from the applied lists.
-                from gui_utils import held_hole_clearance_for_results
+                from .gui_utils import held_hole_clearance_for_results
                 _hole_clr = held_hole_clearance_for_results(
                     self.pcb_data, board, results_data, eff_clearance)
                 targets = compute_targets(
