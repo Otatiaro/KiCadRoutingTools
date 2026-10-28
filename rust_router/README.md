@@ -5,7 +5,7 @@ The compiled half of KiCad Routing Tools: the Python extension module
 searches and obstacle map, the placer's per-move kernels, and the grid searches
 of the `awx/` whole-route bus router. The rest is Python that calls in here.
 
-**Current Version: 0.23.7** (the crate version in `Cargo.toml`)
+**Current Version: 0.24.0** (the crate version in `Cargo.toml`)
 
 > **Release note:** the newest published release is
 > [v0.23.7](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.23.7)
@@ -270,14 +270,19 @@ as rung 0.
 - `get_cross_layer_attraction(gx, gy, current_layer, attraction_radius, attraction_bonus)`: the bonus for tracks on OTHER layers near (gx, gy); none in stub-proximity or BGA zones
 - `build_attraction_field(attraction_radius, attraction_bonus)`: precompute that bonus per layer so the lookup is O(1) (boards of up to 8 layers)
 
-**Copies and statistics**
+**Copies and statistics.** The counted cells and vias and the proximity
+costs live in 64 x 64 tiles allocated on first write and shared between
+copies: a copy owns only the tiles it writes to (copy-on-write), so a clone
+per routed net costs the tiles that net changes, not the board. The static
+bitmaps are shared the same way. The map is `Send + Sync`.
 - `clone()`, `clone_fresh()` (a copy without the source/target cells), `shrink_to_fit()`
 - `get_stats()`: (blocked cells, blocked vias, stub-proximity cells, layer-proximity cells, cross-layer cells, source/target cells, free vias, via-rung cells)
 - `get_static_stats()`: (static cells, static vias); `dynamic_refcount_stats()`: (distinct cells, cells counted >= 2, highest count, distinct vias, vias counted >= 2)
+- `tile_stats()`: (counted tiles, cost tiles, bytes they hold), tiles shared with copies included; `tiles_shared_with(other)`: (tiles this map shares with `other`, tiles in all)
 
 The Python side does not call `merge_blocked_from`, `is_blocked_with_margin`,
-`is_in_any_proximity_zone`, `build_attraction_field` or
-`dynamic_refcount_stats` at present.
+`is_in_any_proximity_zone`, `build_attraction_field`,
+`dynamic_refcount_stats` or `tiles_shared_with` at present.
 
 ### GridRouter
 
@@ -451,6 +456,27 @@ src/
 - **Placement kernels**: the trees and gap trees keep the Python's float expressions in order; the crossing and pad-hit kernels skip pairs whose boxes cannot meet; the congestion kernels sum a move's change over the cells it reaches, so their totals can differ from a whole-window Python sum in the last bits
 
 ## Version History
+
+### 0.24.0 (2026-10-28)
+- **Obstacle map in copy-on-write tiles** (`tiled.rs`, `obstacle_map.rs`):
+  the counted blocked cells and vias (every via rung) and the stub and
+  layer proximity costs move from `FxHashMap`s (~25-35 bytes per entry, each
+  `clone_fresh()` copying them whole) to 64 x 64 tiles behind `Arc`s,
+  allocated on first write. A counted tile is a presence mask (one `u64`
+  per row, the `is_blocked` test) and a byte count per cell, counts above
+  254 in a side table; a cost tile holds `i32`s. A copy shares every tile
+  until it writes to one (`Arc::make_mut`); decrementing an absent cell
+  copies nothing. The static bitmaps share their bits (`Arc<[u64]>`), and
+  the dynamic bitmap cache (S2) is gone: the tile mask is the presence bit.
+  Same answers to every query, so routing is unchanged: route.py on a
+  synthetic 150 x 107.5 mm 4-layer board at 0.05 mm, same JSON_SUMMARY,
+  `check_drc` and `check_connected`, peak commit 1486 -> 486 MB and
+  74 -> 69 s with 24 nets, 2758 -> 824 MB and 357 -> 307 s with 96 nets.
+  `add_stub_proximity_costs_batch` with 2000 stubs of radius 40: 629 ->
+  102 ms. The microbench maze (no costs, a pure `is_blocked` load): about
+  4% slower, one more dependent load than the flat bitmap.
+- `tile_stats()` and `tiles_shared_with(other)` report the tiles a map holds
+  and shares.
 
 ### 0.23.7 (2026-10-18)
 - **Congestion priced only where it can change** (`placement_kernels.rs`):
