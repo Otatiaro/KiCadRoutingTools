@@ -20,6 +20,9 @@ board is the one the destination fanout runs on.
 usage: fanout_from_plan.py OUT.kicad_pcb K --board=BASE.kicad_pcb
        fanout_from_plan.py OUT.kicad_pcb --hold    (FANOUT_JOINT: OUT's joint copper held to its passives, joint_hold)
 """
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import math
 import contextlib
 import io

@@ -37,6 +37,9 @@ usage: flow_frame.py quarter BOARD DEST NET[,NET...]   -> "k cx cy"
        flow_frame.py turn IN OUT K CX CY                 (K may be negative)
 """
 import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+import os
 import shutil
 import sys
 

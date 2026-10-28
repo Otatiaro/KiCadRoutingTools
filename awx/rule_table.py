@@ -5,6 +5,9 @@ via equivalent everywhere): vias on the run's nets, copper mm, the score
 vias + mm / VIA_MM, and the open nets (grade_k's two shapes). One row per
 arm and K, arms as columns of the score table at the end. Default DIR:
 tmp/s10 (+ the s9 control d40)."""
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import glob
 import math
 import os

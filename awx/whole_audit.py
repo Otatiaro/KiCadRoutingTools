@@ -3,6 +3,9 @@ whole route's lanes as the router gets them (whole_ctx.lanes).
 
 usage as a driver: whole_audit.py GEO.json [checks]   -- reads the bench (whole_ctx: BENCH / NETS / DEST), installs,
 runs plan_audit's checks (default: pitch dives static shape bands swim). whole_gate.py reads the output."""
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import sys, json
 import awx_settings
 

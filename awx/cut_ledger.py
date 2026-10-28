@@ -21,6 +21,9 @@ usage: cut_ledger.py FANOUT_BOARD K [--dest DU1] [--step 0.2]
 """
 
 KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import argparse
 import os
 import subprocess

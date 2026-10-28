@@ -9,6 +9,9 @@ This is a wrapper script that imports from the bga_fanout package.
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': ['routing'], 'kind': 'actor'}
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 from bga_fanout import main
 
 if __name__ == '__main__':

@@ -23,6 +23,9 @@ from __future__ import annotations
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': ['routing'], 'kind': 'instrument'}
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import warnings

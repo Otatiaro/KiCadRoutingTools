@@ -13,6 +13,9 @@ container as in the other, the 3-layer ones 5.6x, both runs of one code).
 """
 KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # a research tool (awx), catalogued, shown at no door
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import argparse
 import csv
 import os
