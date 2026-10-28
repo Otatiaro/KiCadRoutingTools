@@ -121,13 +121,13 @@ def format_obstacle_map_stats(obstacles) -> str:
     blocked_cells, blocked_vias, stub_prox, layer_prox, cross_layer, source_target = stats[:6]
     free_vias = stats[6] if len(stats) > 6 else 0
 
-    # hashbrown/FxHashMap effective bytes/entry (key+value+control, ~0.875 load):
-    # (u64,u16)/(u64,i32) maps ~24B; FxHashSet<u64> ~16B. Round to ~24B for maps,
-    # ~16B for the sets (allowed/source_target/free_vias are sets).
+    # Blocked cells/vias and proximity costs are 64 x 64 tiles (grid_router
+    # 0.24): tile_stats() gives their bytes, tiles shared with clones
+    # included. The rest are hash sets/maps, ~16-24 B per entry.
     MAP_B, SET_B = 24, 16
-    map_entries = blocked_cells + blocked_vias + stub_prox + layer_prox + cross_layer
-    set_entries = source_target + free_vias
-    estimated_mb = (map_entries * MAP_B + set_entries * SET_B) / (1024 * 1024)
+    tile_bytes = obstacles.tile_stats()[2] if hasattr(obstacles, 'tile_stats') else 0
+    estimated_mb = (tile_bytes + cross_layer * MAP_B
+                    + (source_target + free_vias) * SET_B) / (1024 * 1024)
 
     return (f"[MEMORY] Rust obstacle map: ~{estimated_mb:.1f} MB estimated\n"
             f"         blocked_cells: {blocked_cells:,}, blocked_vias: {blocked_vias:,}\n"
