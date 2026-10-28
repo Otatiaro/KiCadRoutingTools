@@ -70,7 +70,10 @@ class CornerIndex:
 
     def __init__(self, segs, cell: float = _CELL):
         self.cell = cell
-        self.cells = defaultdict(set)
+        # A cell keeps its tracks in insertion order (a dict, not a set of
+        # ids): a set iterates in address order, which changes run to run, and
+        # near() feeds arms_at, whose order breaks ties between equal angles.
+        self.cells = defaultdict(dict)
         self.segs = {}
         for s in segs:
             self.add(s)
@@ -86,12 +89,12 @@ class CornerIndex:
     def add(self, s):
         self.segs[id(s)] = s
         for k in self._keys(s):
-            self.cells[k].add(id(s))
+            self.cells[k][id(s)] = None
 
     def remove(self, s):
         self.segs.pop(id(s), None)
         for k in self._keys(s):
-            self.cells[k].discard(id(s))
+            self.cells[k].pop(id(s), None)
 
     def near(self, x, y, layer):
         c = self.cell
