@@ -347,6 +347,9 @@ def refresh() -> None:
     # The pass moves no copper, so this is an A/B isolation knob like
     # KICAD_NO_SOFT_JOINT_BRIDGE, not a behaviour choice.
     g['MERGE_COLLINEAR'] = _on_default('KICAD_MERGE_COLLINEAR')
+    # #1233 acute-corner chamfer (default ON, KICAD_ACUTE_CHAMFER=0 ablates),
+    # an A/B isolation knob like the two above.
+    g['ACUTE_CHAMFER'] = _on_default('KICAD_ACUTE_CHAMFER')
     g['BOARD_LEDGER'] = _truthy('KICAD_BOARD_LEDGER')
     # "x,y" via position string ('' = off; consumers test truthiness + parse)
     g['RESCUE_DEBUG_VIA'] = _s('KICAD_RESCUE_DEBUG_VIA')

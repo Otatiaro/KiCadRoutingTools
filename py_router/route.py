@@ -1932,37 +1932,14 @@ def _late_kicad_dangling_split1217(pcb_data, output_file, return_results,
     read-only; locked and sense-held copper is never split. Returns the number
     of tracks split.
     """
-    import copy as _copy
-    from collections import Counter
-    from improvement_gate import copper_item_key
     from pcb_modification import split_kicad_dangling_hosts
     try:
-        rd = None
-        if return_results:
-            rd = results_data if results_data is not None else {}
-            board = _copy.copy(pcb_data)
-            if write_model is not None:
-                segs_by_net, vias_by_net = write_model(rd)
-                board.segments = [x for _l in segs_by_net.values() for x in _l]
-                board.vias = [x for _l in vias_by_net.values() for x in _l]
-            else:
-                board.segments = list(pcb_data.segments)
-                board.vias = list(pcb_data.vias)
-        elif output_file and os.path.isfile(output_file):
-            from kicad_parser import parse_kicad_pcb as _pk1217
-            board = _pk1217(output_file)
-        else:
+        got = _late_shipped_board(pcb_data, output_file, return_results,
+                                  results_data, write_model, input_signature,
+                                  keep_input_copper)
+        if got is None:
             return 0
-        name_of = {nid: n.name for nid, n in board.nets.items()}
-        readonly = set()
-        if keep_input_copper:
-            left = {n: Counter(c) for n, c in (input_signature or {}).items()}
-            for s in board.segments:
-                c = left.get(name_of.get(s.net_id))
-                k = copper_item_key(s)
-                if c and c[k] > 0:
-                    c[k] -= 1
-                    readonly.add(id(s))
+        board, rd, name_of, readonly = got
         scope = {nid for nid, nm in name_of.items() if nm in set(scope_names)}
         if not scope:
             return 0
@@ -1971,57 +1948,9 @@ def _late_kicad_dangling_split1217(pcb_data, output_file, return_results,
                                            stats=_stats)
         if not pairs:
             return 0
-        if return_results:
-            pieces = {id(h): ps for h, ps in pairs}
-
-            def _swap(lst):
-                return [p for x in lst for p in pieces.get(id(x), [x])]
-            owned = set()
-            for r in rd.get('results') or []:
-                if r.get('new_segments'):
-                    owned.update(id(x) for x in r['new_segments']
-                                 if id(x) in pieces)
-                    r['new_segments'] = _swap(r['new_segments'])
-            if rd.get('all_swap_segments'):
-                owned.update(id(x) for x in rd['all_swap_segments']
-                             if id(x) in pieces)
-                rd['all_swap_segments'] = _swap(rd['all_swap_segments'])
-            # A split INPUT track leaves through the removal channel and its
-            # pieces arrive as this run's copper.
-            inputs = [h for h, _ps in pairs if id(h) not in owned]
-            if inputs:
-                rd.setdefault('segments_to_remove', []).extend(inputs)
-                rd.setdefault('results', []).append({
-                    'new_segments': [p for h in inputs for p in pieces[id(h)]],
-                    'new_vias': [], 'cleanup': 'kicad_dangling_split'})
-            pcb_data.segments = _swap(pcb_data.segments)
-            bump_copper_epoch(pcb_data)
-            n = len(pairs)
-        else:
-            from kicad_parser import board_uses_name_nets
-            from kicad_writer import generate_segment_sexpr
-            unmatched = []
-            _strip_written_copper(output_file, [h for h, _ps in pairs], [],
-                                  name_of, match_width=True,
-                                  unmatched_out=unmatched)
-            # Only a host whose block left the file gets its pieces.
-            missed = {id(h) for h in unmatched}
-            with open(output_file, 'r', encoding='utf-8') as _f:
-                content = _f.read()
-            v10 = board_uses_name_nets(content)
-            sexprs = [generate_segment_sexpr(
-                (p.start_x, p.start_y), (p.end_x, p.end_y), p.width, p.layer,
-                p.net_id, name_of.get(p.net_id) if v10 else None)
-                for h, ps in pairs if id(h) not in missed for p in ps]
-            if sexprs:
-                lp = content.rfind(')')
-                content = content[:lp] + '\n'.join(sexprs) + '\n' + content[lp:]
-                with open(output_file, 'w', encoding='utf-8') as _f:
-                    _f.write(content)
-            n = len(pairs) - len(missed)
-            if missed:
-                print(f"  WARNING: KiCad-dangling split (#1217): chose "
-                      f"{len(pairs)} track(s), found {n} in the written file")
+        n = _ship_replacements(pairs, pcb_data, output_file, return_results, rd,
+                               name_of, 'kicad_dangling_split',
+                               'KiCad-dangling split (#1217)')
         print(f"  KiCad-dangling joints (#1217, end of run): split {n} "
               f"track(s) at the joint landing on them, on "
               f"{_stats.get('nets', 0)} net(s); copper unchanged"
@@ -2030,6 +1959,150 @@ def _late_kicad_dangling_split1217(pcb_data, output_file, return_results,
         return n
     except Exception as _e:                                     # noqa: BLE001
         print(f"  (end-of-run KiCad-dangling split skipped: "
+              f"{type(_e).__name__}: {_e})")
+        return 0
+
+
+def _late_shipped_board(pcb_data, output_file, return_results, results_data,
+                        write_model, input_signature, keep_input_copper):
+    """The board this run SHIPS, for an end-of-run pass that re-shapes tracks
+    (#1217, #1233): the written file on the CLI, the write model on the GUI
+    (pcb_data itself when the run laid nothing, where write_model is None).
+    Returns (board, results_data, {net_id: name}, readonly segment ids) or
+    None. Input copper is told from the run's by VALUE (input_signature);
+    with --keep-input-copper it is read-only."""
+    import copy as _copy
+    from collections import Counter
+    from improvement_gate import copper_item_key
+    rd = None
+    if return_results:
+        rd = results_data if results_data is not None else {}
+        board = _copy.copy(pcb_data)
+        if write_model is not None:
+            segs_by_net, vias_by_net = write_model(rd)
+            board.segments = [x for _l in segs_by_net.values() for x in _l]
+            board.vias = [x for _l in vias_by_net.values() for x in _l]
+        else:
+            board.segments = list(pcb_data.segments)
+            board.vias = list(pcb_data.vias)
+    elif output_file and os.path.isfile(output_file):
+        from kicad_parser import parse_kicad_pcb as _pk1217
+        board = _pk1217(output_file)
+    else:
+        return None
+    name_of = {nid: n.name for nid, n in board.nets.items()}
+    readonly = set()
+    if keep_input_copper:
+        left = {n: Counter(c) for n, c in (input_signature or {}).items()}
+        for s in board.segments:
+            c = left.get(name_of.get(s.net_id))
+            k = copper_item_key(s)
+            if c and c[k] > 0:
+                c[k] -= 1
+                readonly.add(id(s))
+    return board, rd, name_of, readonly
+
+
+def _ship_replacements(pairs, pcb_data, output_file, return_results, rd,
+                       name_of, cleanup, label):
+    """Put ``[(segment, pieces)]`` -- tracks an end-of-run pass replaced on
+    the board from _late_shipped_board -- on that board's channel: the write
+    model on the GUI (an INPUT track leaves through the removal channel and
+    its pieces arrive as this run's copper, tagged ``cleanup``), the written
+    file on the CLI (only a track whose block left the file gets its pieces).
+    Returns the number of tracks replaced."""
+    if return_results:
+        pieces = {id(h): ps for h, ps in pairs}
+
+        def _swap(lst):
+            return [p for x in lst for p in pieces.get(id(x), [x])]
+        owned = set()
+        for r in rd.get('results') or []:
+            if r.get('new_segments'):
+                owned.update(id(x) for x in r['new_segments']
+                             if id(x) in pieces)
+                r['new_segments'] = _swap(r['new_segments'])
+        if rd.get('all_swap_segments'):
+            owned.update(id(x) for x in rd['all_swap_segments']
+                         if id(x) in pieces)
+            rd['all_swap_segments'] = _swap(rd['all_swap_segments'])
+        inputs = [h for h, _ps in pairs if id(h) not in owned]
+        if inputs:
+            rd.setdefault('segments_to_remove', []).extend(inputs)
+            rd.setdefault('results', []).append({
+                'new_segments': [p for h in inputs for p in pieces[id(h)]],
+                'new_vias': [], 'cleanup': cleanup})
+        pcb_data.segments = _swap(pcb_data.segments)
+        bump_copper_epoch(pcb_data)
+        return len(pairs)
+    from kicad_parser import board_uses_name_nets
+    from kicad_writer import generate_segment_sexpr
+    unmatched = []
+    _strip_written_copper(output_file, [h for h, _ps in pairs], [],
+                          name_of, match_width=True,
+                          unmatched_out=unmatched)
+    missed = {id(h) for h in unmatched}
+    with open(output_file, 'r', encoding='utf-8') as _f:
+        content = _f.read()
+    v10 = board_uses_name_nets(content)
+    sexprs = [generate_segment_sexpr(
+        (p.start_x, p.start_y), (p.end_x, p.end_y), p.width, p.layer,
+        p.net_id, name_of.get(p.net_id) if v10 else None)
+        for h, ps in pairs if id(h) not in missed for p in ps]
+    if sexprs:
+        lp = content.rfind(')')
+        content = content[:lp] + '\n'.join(sexprs) + '\n' + content[lp:]
+        with open(output_file, 'w', encoding='utf-8') as _f:
+            _f.write(content)
+    n = len(pairs) - len(missed)
+    if missed:
+        print(f"  WARNING: {label}: chose {len(pairs)} track(s), found {n} "
+              f"in the written file")
+    return n
+
+
+def _late_acute_chamfer1233(pcb_data, output_file, return_results,
+                            results_data, write_model, input_signature,
+                            scope_names, keep_input_copper, config):
+    """Cut the acute corners between same-net tracks (#1233) on the board
+    this run SHIPS, after every pass that lays copper (the finalize's taps
+    and oracle legs lay them after the run's cleanup did the same).
+    acute_corners.chamfer_acute_corners does the cutting, judged by the
+    octolinear smoother's clearance predicate; protected and impedance nets
+    keep their geometry. Same plumbing and scope as the #1217 split. Returns
+    the number of corners cut."""
+    from acute_corners import chamfer_acute_corners
+    from cleanup_pipeline import _smooth_skip_net_ids
+    from pcb_modification import make_segment_clears
+    try:
+        got = _late_shipped_board(pcb_data, output_file, return_results,
+                                  results_data, write_model, input_signature,
+                                  keep_input_copper)
+        if got is None:
+            return 0
+        board, rd, name_of, readonly = got
+        scope = {nid for nid, nm in name_of.items() if nm in set(scope_names)}
+        if not scope:
+            return 0
+        clears = make_segment_clears(
+            board, config, config.clearance,
+            getattr(config, 'net_clearances', None) or None,
+            getattr(config, 'board_edge_clearance', 0.0) or 0.0)
+        _stats = {}
+        pairs = chamfer_acute_corners(board, scope, clears=clears,
+                                      readonly_ids=readonly,
+                                      skip_net_ids=_smooth_skip_net_ids(board),
+                                      stats=_stats)
+        if not pairs:
+            return 0
+        _ship_replacements(pairs, pcb_data, output_file, return_results, rd,
+                           name_of, 'acute_chamfer', 'acute-corner chamfer (#1233)')
+        print(f"  Acute corners (#1233, end of run): cut {_stats['cut']} on "
+              f"{_stats['nets']} net(s)"
+              + (f" ({_stats['left']} no cut clears)" if _stats.get('left') else ""))
+        return _stats['cut']
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  (end-of-run acute-corner chamfer skipped: "
               f"{type(_e).__name__}: {_e})")
         return 0
 
@@ -8803,6 +8876,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             {pcb_data.nets[_n].name for _n in sweep_scope_ids
              if _n in pcb_data.nets},
             keep_input_copper)
+        # #1233: the corners every copper-laying pass above left acute, cut
+        # before the #1217 re-split reads the joints the cuts make.
+        if env_knobs.ACUTE_CHAMFER:
+            _late_acute_chamfer1233(
+                pcb_data, output_file, return_results,
+                locals().get('results_data'), _gui_write_model, _input_sig1069,
+                {pcb_data.nets[_n].name for _n in sweep_scope_ids
+                 if _n in pcb_data.nets},
+                keep_input_copper, config)
         # #1217 again: KiCad's count reads the ENDPOINTS of the tracks around
         # a joint, and each removal above can take one. (The orphan sweep
         # below removes only copper no joint touches: an island touching a
