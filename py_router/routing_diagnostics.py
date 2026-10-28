@@ -440,7 +440,8 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
     import io
     import math
     from contextlib import redirect_stdout
-    from plane_blocker_detection import find_route_blocker_from_frontier
+    from plane_blocker_detection import (frontier_block_counts,
+                                         top_frontier_blocker)
     protected = set(routed_net_ids) | {net_id, 0}
     from kicad_parser import pour_zones
     # Plane nets are never named as blockers; a teardropped signal net is not
@@ -478,12 +479,16 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
     for cell_set in (near_cells, blocked_cells):
         if not cell_set:
             continue
+        counts = None  # the tally is the same for every pick: count once
         for _ in range(8):
             if len(names) >= 6:
                 break
+            if counts is None:
+                counts = frontier_block_counts(cell_set, pcb_data, config,
+                                               net_id)
             with redirect_stdout(io.StringIO()):  # silence the helper's
-                blocker = find_route_blocker_from_frontier(  # protected-net chatter
-                    cell_set, pcb_data, config, net_id, protected)
+                blocker = top_frontier_blocker(  # protected-net chatter
+                    counts, pcb_data, protected)
             if blocker is None:
                 break
             protected.add(blocker)
