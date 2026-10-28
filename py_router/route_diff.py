@@ -1362,7 +1362,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # stamped per pair while a bound member routes. Set on every run: the
     # GUI's Differential tab hands each run the same PCBData.
     from net_keepouts import attach as _nk_attach
-    _nk_attach(pcb_data, getattr(getattr(config, 'rules', None), 'net_keepouts', None))
+    _nk_attach(pcb_data, ((getattr(getattr(config, 'rules', None), 'net_keepouts', None) or [])
+                          + (getattr(getattr(config, 'rules', None), 'copper_rules', None) or [])))
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers

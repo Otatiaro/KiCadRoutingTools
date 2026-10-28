@@ -3293,8 +3293,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # output's .kicad_dru does not exist yet mid-run.
     from net_keepouts import attach as _nk_attach
     _nk_attach(pcb_data, net_keepouts if net_keepouts is not None
-               else getattr(getattr(config, 'rules', None), 'net_keepouts', None))
-    _reconcile_kwargs['net_keepouts'] = list(getattr(pcb_data, '_net_keepouts', None) or [])
+               else ((getattr(getattr(config, 'rules', None), 'net_keepouts', None) or [])
+                     + (getattr(getattr(config, 'rules', None), 'copper_rules', None) or [])))
+    from net_keepouts import attached as _nk_attached
+    _reconcile_kwargs['net_keepouts'] = _nk_attached(pcb_data)
 
     # Apply target swaps for single-ended swappable-nets
     single_ended_target_swaps: Dict[str, str] = {}

@@ -1031,7 +1031,16 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
             tuple(sorted(lmap.items())))
     if _key not in _ANNOUNCED:
         _ANNOUNCED.add(_key)
+        # A rule the resolver's channels honour (dru_copper_rules) is
+        # reported there; its "non-layer scope, skipped" note here would
+        # contradict it.
+        _honoured = {r.name for r in getattr(getattr(config, 'rules', None),
+                                             'rules', None) or []
+                     if getattr(r, 'honoured', None)}
         for note in notes:
+            if 'non-layer scope' in note and any(
+                    note.startswith(f"rule '{n}':") for n in _honoured):
+                continue
             print(f"  .kicad_dru: {note}")
         if lmap:
             vals = ", ".join(f"{l}:{v:g}" for l, v in sorted(lmap.items()))

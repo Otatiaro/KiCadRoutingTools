@@ -208,6 +208,12 @@ class RuleItem:
     plated: bool = True
     # the rule areas the item lies in, for an areas=True condition only
     areas: FrozenSet[str] = frozenset()
+    # KiCad's Hole_Size_X / Hole_Size_Y, mm: a pad's or via's drill (a slot's
+    # size along each axis). None = not known: 0 for an item that has no hole
+    # (a track, a zone), and a comparison on a pad or via of unknown hole
+    # leaves the rule unmatched rather than guessing it.
+    hole_x: Optional[float] = None
+    hole_y: Optional[float] = None
 
 
 @dataclass
@@ -391,6 +397,13 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                         rule.unsupported = (f"condition: {e} here; route.py and "
                                             f"route_diff.py read it as a "
                                             f"net-filtered keep-out")
+        if (rule.condition is not None and rule.unsupported is None
+                and _reads_hole_size(rule.condition)
+                and set(rule.constraints) & SIZE_KINDS):
+            # The router sizes a via before it has a hole to compare, so a
+            # size rule keyed on the hole would be read as never binding.
+            rule.unsupported = ("a size rule keyed on Hole_Size_X/Y: the "
+                                "router sizes vias before their hole is known")
         if rule.layer_clause is not None and rule.unsupported is None:
             lc = rule.layer_clause
             if not (lc in ('outer', 'inner', '*.Cu', '*') or lc.endswith('.Cu')):
@@ -418,13 +431,17 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
 #   inDiffPair('pattern') (#1295), and AB.isCoupledDiffPair() as a term of an
 #   AND only, positive (#1293: the pair's own P<->N rule) or negated (#1295:
 #   KiCad's "keep pairs apart" rule); OR'ed or compared it stays Unsupported
+# Numeric properties: Hole_Size_X, Hole_Size_Y, compared with ==, !=, <, <=, >,
+#   >= against a number with an optional unit (mm, mil, in, um, nm; a bare
+#   number is mm). A string == / != is KiCad's: case-insensitive, with the '*'
+#   and '?' wildcards on the right-hand side (libeval WildCompareString).
 # Recognised but NOT modelled (-> Unsupported): intersectsArea, enclosedByArea,
 #   insideArea (each modelled ONLY for a `disallow` rule's net-filtered keep-out:
 #   parse_condition(areas=True), net_keepouts.derive_area_keepouts),
 #   intersectsCourtyard, intersectsFrontCourtyard, intersectsBackCourtyard,
 #   isCoupledDiffPair in any other position, fromTo, memberOfSheet,
-#   memberOfSheetOrChildren, hasComponentClass, getField, and any numeric
-#   comparison (<, >, arithmetic).
+#   memberOfSheetOrChildren, hasComponentClass, getField, any other numeric
+#   property, and arithmetic.
 
 _TOKEN = re.compile(r"""
     \s*(?:
@@ -436,7 +453,11 @@ _TOKEN = re.compile(r"""
     )""", re.VERBOSE)
 
 _SUPPORTED_PROPS = {'netclass', 'netname', 'net', 'type', 'layer', 'pad_type',
-                    'via_type'}
+                    'via_type', 'hole_size_x', 'hole_size_y'}
+#: The numeric properties among them, compared in mm.
+_NUMERIC_PROPS = {'hole_size_x', 'hole_size_y'}
+_NUM_UNIT_MM = {'mm': 1.0, 'mil': 0.0254, 'in': 25.4, 'um': 0.001, 'nm': 1e-6}
+_NUM = re.compile(r"^(-?\d+(?:\.\d+)?)\s*(mm|mil|in|um|nm)?$")
 _SUPPORTED_FUNCS = {'hasnetclass', 'hasexactnetclass', 'onlayer', 'existsonlayer',
                     'ismicrovia', 'isblindburiedvia', 'isplated',
                     'memberoffootprint', 'memberofgroup', 'indiffpair'}
@@ -521,12 +542,19 @@ class _Parser:
     def cmp(self):
         lhs = self.term()
         k, v = self.peek()
-        if k == 'op' and v in ('==', '!='):
+        if k == 'op' and v in ('==', '!=', '<', '>', '<=', '>='):
             self.take()
             rhs = self.term()
+            numeric = [_is_numeric(x) for x in (lhs, rhs)]
+            if v not in ('==', '!=') or any(numeric):
+                # A numeric comparison: a numeric property against a number.
+                if not all(numeric):
+                    raise Unsupported(f"comparison {v} between a number and a "
+                                      f"non-numeric term")
+                return ('ncmp', v, lhs, rhs)
             return ('cmp', v, lhs, rhs)
-        if k == 'op' and v in ('<', '>', '<=', '>=', '+', '-', '*', '/'):
-            raise Unsupported(f"numeric comparison/arithmetic ({v})")
+        if k == 'op' and v in ('+', '-', '*', '/'):
+            raise Unsupported(f"arithmetic ({v})")
         return lhs
 
     def term(self):
@@ -536,7 +564,10 @@ class _Parser:
             return ('lit', v[1:-1])
         if k == 'num':
             self.take()
-            raise Unsupported("numeric literal outside a supported comparison")
+            m = _NUM.match(v)
+            if not m:
+                raise Unsupported(f"number {v!r}")
+            return ('num', float(m.group(1)) * _NUM_UNIT_MM[m.group(2) or 'mm'])
         if k == 'name':
             self.take()
             if '.' not in v:
@@ -580,6 +611,18 @@ class _Parser:
                 raise Unsupported(f"property {name} not modelled")
             return ('prop', item_u, lname)
         raise Unsupported(f"unexpected token {v!r}")
+
+
+def _reads_hole_size(node) -> bool:
+    if not isinstance(node, tuple) or not node:
+        return False
+    if node[0] == 'prop' and node[2] in _NUMERIC_PROPS:
+        return True
+    return any(_reads_hole_size(c) for c in node[1:] if isinstance(c, tuple))
+
+
+def _is_numeric(node) -> bool:
+    return node[0] == 'num' or (node[0] == 'prop' and node[2] in _NUMERIC_PROPS)
 
 
 def parse_condition(src: str, areas: bool = False):
@@ -732,6 +775,14 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
         return not _eval(node[1], a, b, layer, ctx)
     if op == 'coupled':
         return _is_coupled(a, b, ctx)
+    if op == 'ncmp':
+        _, cop, lhs, rhs = node
+        lv = float(_value(lhs, a, b, layer, ctx) or 0.0)
+        rv = float(_value(rhs, a, b, layer, ctx) or 0.0)
+        eps = 1e-9
+        return {'==': abs(lv - rv) <= eps, '!=': abs(lv - rv) > eps,
+                '<': lv < rv - eps, '<=': lv <= rv + eps,
+                '>': lv > rv + eps, '>=': lv >= rv - eps}[cop]
     if op == 'cmp':
         _, cop, lhs, rhs = node
         lv = _value(lhs, a, b, layer, ctx)
@@ -760,7 +811,15 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
 
 def _cmp_strings(lhs_node, lv: str, rv: str) -> bool:
     prop = lhs_node[2] if lhs_node[0] == 'prop' else None
-    if prop in ('type', 'pad_type', 'via_type'):
+    if prop == 'pad_type':
+        # KiCad spells it 'Through-hole', 'SMD', 'NPTH, mechanical'; the
+        # parser 'thru_hole', 'smd', 'np_thru_hole'.
+        lt, rt = _norm_type(lv), _norm_type(rv)
+        return _PAD_TYPE_NAMES.get(lt, lt) == _PAD_TYPE_NAMES.get(rt, rt)
+    if prop == 'via_type':
+        lt, rt = _norm_type(lv), _norm_type(rv)
+        return _VIA_TYPE_NAMES.get(lt, lt) == _VIA_TYPE_NAMES.get(rt, rt)
+    if prop == 'type':
         return _norm_type(lv) == _norm_type(rv)
     if prop == 'netclass':
         # NetClass == 'X' is true for any class the net is a member of (its
@@ -770,7 +829,17 @@ def _cmp_strings(lhs_node, lv: str, rv: str) -> bool:
     if prop == 'layer':
         # KiCad accepts wildcards in layer names ('*.Cu').
         return fnmatch.fnmatchcase(lv, rv) if any(ch in rv for ch in '*?[') else lv == rv
-    return lv == rv
+    return _kicad_wild_eq(rv, lv)
+
+
+def _kicad_wild_eq(pattern: str, text: str) -> bool:
+    """KiCad's string ==: case-insensitive, with the '*' and '?' wildcards
+    in the pattern and nothing else special (libeval VALUE::EqualTo ->
+    WildCompareString), so `B.NetName != 'unconnected-*'` holds for every net
+    but the unconnected ones."""
+    rx = ''.join('.*' if ch == '*' else '.' if ch == '?' else re.escape(ch)
+                 for ch in pattern)
+    return re.fullmatch(rx, text, re.IGNORECASE | re.DOTALL) is not None
 
 
 def _item(which: str, a: RuleItem, b: Optional[RuleItem]) -> Optional[RuleItem]:
@@ -784,6 +853,8 @@ def _item(which: str, a: RuleItem, b: Optional[RuleItem]) -> Optional[RuleItem]:
 def _value(node, a, b, layer, ctx=None):
     op = node[0]
     if op == 'lit':
+        return node[1]
+    if op == 'num':
         return node[1]
     if op == 'L':
         return layer or ''
@@ -811,6 +882,13 @@ def _value(node, a, b, layer, ctx=None):
             return it.pad_type or ''
         if name == 'via_type':
             return it.via_type or ''
+        if name in ('hole_size_x', 'hole_size_y'):
+            v = it.hole_x if name == 'hole_size_x' else it.hole_y
+            if v is None:
+                if it.type in ('pad', 'via'):
+                    raise Unsupported(f"{name} of a {it.type} whose hole is not known")
+                return 0.0
+            return v
     if op == 'call':
         return _call(node, a, b, layer, ctx)
     raise Unsupported(f"value of {op}")
@@ -1173,7 +1251,9 @@ class DesignRules:
             xy=(getattr(pad, 'global_x', None), getattr(pad, 'global_y', None))
             if getattr(pad, 'global_x', None) is not None else None,
             clearance_override=(getattr(pad, 'local_clearance', 0) or None),
-            plated=(getattr(pad, 'pad_type', '') != 'np_thru_hole'))
+            plated=(getattr(pad, 'pad_type', '') != 'np_thru_hole'),
+            hole_x=float(getattr(pad, 'drill_w', 0) or getattr(pad, 'drill', 0) or 0),
+            hole_y=float(getattr(pad, 'drill_h', 0) or getattr(pad, 'drill', 0) or 0))
 
     # ---------------- resolution ----------------
 
@@ -1560,6 +1640,16 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
         except Exception as e:                                 # noqa: BLE001
             rules.net_keepouts = []
             rules.notes.append(f"net-filtered keep-outs not derived ({e})")
+    # Net-pair and pad hole-clearance rules (dru_copper_rules): derived for
+    # every engine that installs the rules, stamped by the ones that route
+    # (net_keepouts.stamp) and by the plane-tap via map.
+    if pcb_data is not None:
+        try:
+            from dru_copper_rules import derive as _derive_copper
+            rules.copper_rules = _derive_copper(rules, pcb_data)
+        except Exception as e:                                 # noqa: BLE001
+            rules.copper_rules = []
+            rules.notes.append(f"net-pair / hole clearance rules not derived ({e})")
     try:
         config.rules = rules
     except Exception:                                          # noqa: BLE001
