@@ -235,9 +235,11 @@ class _Recorder:
         pass                    # stamp() mirrors the full-size via cells itself
 
     def arrays(self):
-        cells = (np.unique(np.concatenate(self.cells), axis=0) if self.cells
+        # Not de-duplicated: a row stamped twice is removed twice, so the
+        # refcounts balance, and sorting the rows cost more than the stamp.
+        cells = (np.ascontiguousarray(np.concatenate(self.cells)) if self.cells
                  else np.empty((0, 3), dtype=np.int32))
-        vias = (np.unique(np.concatenate(self.vias), axis=0) if self.vias
+        vias = (np.ascontiguousarray(np.concatenate(self.vias)) if self.vias
                 else np.empty((0, 2), dtype=np.int32))
         return cells, vias
 
@@ -327,13 +329,38 @@ def _stamper(pcb_data, entries, net_ids, extra):
                     rec = _Recorder()
                     _pad_hole_cells(rec, pads, e['clearance'], config, coord,
                                     layer_map, all_layers, extra)
-                    cache[ckey] = rec.arrays()
+                    # Only what the pads' own stamps (at the clearance the
+                    # map prices them) leave open: most of a ring lies under
+                    # its pad's copper band, and re-adding it every route
+                    # cost more than the route.
+                    own = _Recorder()
+                    for p in pads:
+                        _add_pad_obstacle(own, p, coord, layer_map, config, extra,
+                                          clearance_override=config.obstacle_clearance(
+                                              p.net_id))
+                    cells, vias = rec.arrays()
+                    ocells, ovias = own.arrays()
+                    cache[ckey] = (_minus(cells, ocells), _minus(vias, ovias))
                 cells, vias = cache[ckey]
                 if len(cells):
                     sink.add_blocked_cells_batch(cells)
                 if len(vias):
                     sink.add_blocked_vias_batch(vias)
     return run
+
+
+def _minus(rows, drop):
+    """The distinct rows of `rows` not in `drop` (int32 cell rows)."""
+    if not len(rows):
+        return rows
+    rows = np.unique(rows, axis=0)
+    if not len(drop):
+        return rows
+    def key(a):
+        a = a.astype(np.int64)
+        k = a[:, 0] * 4000003 + a[:, 1]
+        return k * 64 + a[:, 2] if a.shape[1] == 3 else k
+    return np.ascontiguousarray(rows[~np.isin(key(rows), key(drop))])
 
 
 def _pad_hole_cells(sink, pads, c, config, coord, layer_map, all_layers, extra):
