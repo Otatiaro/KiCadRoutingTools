@@ -138,13 +138,14 @@ hp = PCBData(board_info=BoardInfo(layers={0: 'F.Cu'}, copper_layers=['F.Cu'],
 hp._rip_authority_ids = {2}
 hp._preexisting_rips = {3: 'RIPPED'}
 _queue = [2, 3, 4]
-_real_fb = PBD.find_route_blocker_from_frontier
-PBD.find_route_blocker_from_frontier = lambda *a, **k: _queue.pop(0) if _queue else None
+_real_fb = PBD.frontier_block_counts, PBD.top_frontier_blocker
+PBD.frontier_block_counts = lambda *a, **k: {}
+PBD.top_frontier_blocker = lambda *a, **k: _queue.pop(0) if _queue else None
 try:
     text, names = preexisting_blocker_hint([(1, 1, 0)], GridRouteConfig(), hp, 1,
                                            return_names=True)
 finally:
-    PBD.find_route_blocker_from_frontier = _real_fb
+    PBD.frontier_block_counts, PBD.top_frontier_blocker = _real_fb
 check("the returned names (the #103 authority input) are unchanged",
       names == ['AUTO', 'RIPPED', 'BIG'], str(names))
 check("the retry command names only the net outside the run's authority",
