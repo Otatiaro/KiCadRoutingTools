@@ -567,3 +567,112 @@ def _crosses(x1, y1, x2, y2, s) -> bool:
     o3 = orient(s[:, 0], s[:, 1], s[:, 2], s[:, 3], x1, y1)
     o4 = orient(s[:, 0], s[:, 1], s[:, 2], s[:, 3], x2, y2)
     return bool(((o1 * o2 < 0) & (o3 * o4 < 0)).any())
+
+
+def via_clears(pcb_data, net_id, x, y, size, drill) -> bool:
+    """`track_clears` for a through via of `net_id` at (x, y): its copper (on
+    every layer) against the bound copper at the rule value and against a
+    bound pad's hole, and its drill against a bound pad's copper. True when
+    nothing binds. Pads are their bounding circle, as in `track_clears`."""
+    entries = entries_of(pcb_data)
+    if not entries or not net_id:
+        return True
+    groups, holes = _bound_copper(pcb_data, net_id)
+    r = size / 2.0
+    eps = 1e-4
+    for v, (segs, _sl, vias, pads, _pl) in groups.items():
+        if len(segs) and (_pt_seg(x, y, segs[:, 0], segs[:, 1], segs[:, 2], segs[:, 3])
+                          - segs[:, 4] < v + r - eps).any():
+            return False
+        if len(vias) and (np.hypot(vias[:, 0] - x, vias[:, 1] - y) - vias[:, 2]
+                          < v + r - eps).any():
+            return False
+        if len(pads) and (np.hypot(pads[:, 0] - x, pads[:, 1] - y) - pads[:, 2]
+                          < v + r - eps).any():
+            return False
+    if len(holes) and (np.hypot(holes[:, 0] - x, holes[:, 1] - y) - holes[:, 2]
+                       < holes[:, 3] + r - eps).any():
+        return False
+    lookup = _pad_lookup(pcb_data)
+    for e in entries:
+        if e['kind'] != 'pad_hole':
+            continue
+        for k in e['pads']:
+            p = lookup.get(tuple(k))
+            if p is None or p.net_id == net_id:
+                continue
+            if math.hypot(p.global_x - x, p.global_y - y) - math.hypot(p.size_x, p.size_y) / 2.0 \
+                    < e['clearance'] + drill / 2.0 - eps:
+                return False
+    return True
+
+
+def ensure_attached(pcb_data) -> None:
+    """Attach the board's net-pair and pad hole-clearance rules to `pcb_data`
+    when no run did: an engine with no routing config of its own (the QFN and
+    BGA fanouts) derives them from the board's .kicad_dru as every engine
+    does (install_layer_clearances). A PCBData a route step already attached
+    them to keeps its own."""
+    if entries_of(pcb_data):
+        return
+    from routing_config import GridRouteConfig
+    from kicad_dru import install_layer_clearances
+    copper = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
+                  or ['F.Cu', 'B.Cu'])
+    cfg = GridRouteConfig(layers=copper)
+    install_layer_clearances(cfg, None, None, pcb_data)
+    found = getattr(getattr(cfg, 'rules', None), 'copper_rules', None)
+    if found:
+        pcb_data._dru_copper_rules = list(found)
+
+
+def _same_item(a, b, keys):
+    return all(abs(getattr(a, k) - b[j]) < 1e-6 for k, j in keys)
+
+
+def drop_fanout_violations(pcb_data, tracks: List[dict], vias: List[dict],
+                           names: Optional[Dict[int, str]] = None):
+    """The fanout copper that keeps the board's net-pair and pad hole-clearance
+    rules: a net any of whose tracks or vias breaks one loses ALL its fanout
+    copper this call laid (a partial escape is a dangling stub), one net at a
+    time in sorted order until the rest is clean, since two fanned nets can
+    break a rule only together. The dropped copper also leaves `pcb_data`
+    where the engine appended it. Returns (tracks, vias, dropped net names).
+
+    The fanouts check their candidates against their own maps, which price a
+    pair at the layer clearance only; this is the one place both fanouts --
+    and every escape engine inside the BGA one -- pass through before their
+    copper ships."""
+    ensure_attached(pcb_data)
+    if not entries_of(pcb_data) or not (tracks or vias):
+        return tracks, vias, []
+    if names is None:
+        names = {nid: n.name for nid, n in pcb_data.nets.items()}
+    dropped: List[str] = []
+    while True:
+        bad = set()
+        for t in tracks:
+            (x1, y1), (x2, y2) = t['start'], t['end']
+            if not track_clears(pcb_data, t['net_id'], x1, y1, x2, y2, t['layer'], t['width']):
+                bad.add(t['net_id'])
+        for v in vias:
+            if not via_clears(pcb_data, v['net_id'], v['x'], v['y'], v['size'], v['drill']):
+                bad.add(v['net_id'])
+        if not bad:
+            return tracks, vias, dropped
+        nid = min(bad, key=lambda n: names.get(n, '') or str(n))
+        gone_t = [t for t in tracks if t['net_id'] == nid]
+        gone_v = [v for v in vias if v['net_id'] == nid]
+        tracks = [t for t in tracks if t['net_id'] != nid]
+        vias = [v for v in vias if v['net_id'] != nid]
+        pcb_data.segments[:] = [
+            s for s in pcb_data.segments
+            if not (s.net_id == nid and any(
+                _same_item(s, (*t['start'], *t['end']), (('start_x', 0), ('start_y', 1),
+                                                         ('end_x', 2), ('end_y', 3)))
+                and s.layer == t['layer'] for t in gone_t))]
+        pcb_data.vias[:] = [
+            x for x in pcb_data.vias
+            if not (x.net_id == nid and any(
+                _same_item(x, (v['x'], v['y']), (('x', 0), ('y', 1))) for v in gone_v))]
+        dropped.append(names.get(nid, str(nid)))
