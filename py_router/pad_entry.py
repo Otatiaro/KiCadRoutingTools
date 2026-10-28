@@ -23,6 +23,12 @@ route was made to turn past the end. A plane pad tap blocks the same flanks
 in its window's trace map (`block_window_flanks`) and keeps its new via off
 them (`via_site_on_flank`).
 
+The flanks never cost a connection. While stamped they are on record for
+their map (`active`); a search that finds no way in through any end lifts
+them (`lifted`) and routes as before, from a pad's side, saying so on the
+console (single_ended_routing._route_with_via_unblock). A plane tap does the
+same with its whole parameter ladder (plane_pad_tap.tap_pad_with_escalation).
+
 A pad is a row pad when it is an SMD rectangle elongated along one axis
 (length >= 1.5 x width) with another pad of its footprint BESIDE it --
 across its long side, within one pad length. A two-pad passive's pads sit
@@ -193,37 +199,118 @@ def block_window_flanks(obstacles, pads, config, layer_index: int = 0) -> None:
         obstacles.add_blocked_cells_batch(np.unique(np.concatenate(chunks), axis=0))
 
 
-def via_site_on_flank(pads, x: float, y: float, via_size: float, config) -> bool:
-    """True when a via at (x, y) would put its copper over a flank of one of
-    `pads` without sitting inside that pad: its trace would leave the pad
-    from the side. A via on the axis column past the end stays legal."""
+def via_flank_zones(pads, via_size: float, config) -> List[tuple]:
+    """Per pad of `pads`, what `via_site_on_flank` tests a via site against:
+    (cx, cy, half-width, half-length, long axis is x, axis column, the two
+    flank rectangles grown by the via's radius). Built once per tap; the
+    via search asks for thousands of sites."""
     r = via_size / 2
+    column = config.grid_step / 2 + 1e-6
+    zones = []
     for p in pads:
         hw, hl, along_x = _axis(p)
-        dx, dy = x - p.global_x, y - p.global_y
+        grown = [(x0 - r, y0 - r, x1 + r, y1 + r) for x0, y0, x1, y1 in flank_rects(p, config)]
+        zones.append((p.global_x, p.global_y, hw, hl, along_x, column, grown))
+    return zones
+
+
+def via_site_on_flank(zones, x: float, y: float) -> bool:
+    """True when a via at (x, y) would put its copper over a flank of one of
+    the pads `zones` describes (`via_flank_zones`) without sitting inside that
+    pad: its trace would leave the pad from the side. A via on the axis column
+    past the end stays legal."""
+    for cx, cy, hw, hl, along_x, column, grown in zones:
+        if not any(x0 < x < x1 and y0 < y < y1 for x0, y0, x1, y1 in grown):
+            continue
+        dx, dy = x - cx, y - cy
         along, lat = (abs(dx), abs(dy)) if along_x else (abs(dy), abs(dx))
         if along <= hl and lat <= hw:
             continue              # a via in the pad needs no trace
-        if lat <= config.grid_step / 2 + 1e-6:
+        if lat <= column:
             continue              # on the axis column
-        x0, y0, x1, y1 = flank_rects(p, config)[0 if (dy if along_x else dx) > 0 else 1]
-        if x0 - r < x < x1 + r and y0 - r < y < y1 + r:
-            return True
+        return True
     return False
+
+
+#: (id(map), net id) -> (map, cells): the flanks a `stamp` holds on a map
+#: right now, so the route can lift them when no end is free. The map is
+#: pinned in the value so its id cannot be reused while the entry lives.
+_ACTIVE = {}
 
 
 @contextlib.contextmanager
 def stamp(obstacles, pcb_data, net_id: int, config):
     """Block `net_id`'s row-pad flanks in `obstacles` for the duration of the
-    block, then remove exactly what was added."""
+    block, then remove exactly what was added. While the block runs the
+    cells are on record for `lifted` (`active`)."""
     if obstacles is None:
         yield
         return
     cells = net_flank_cells(pcb_data, net_id, config)
-    if len(cells):
-        obstacles.add_blocked_cells_batch(cells)
+    if not len(cells):
+        yield
+        return
+    obstacles.add_blocked_cells_batch(cells)
+    key = (id(obstacles), net_id)
+    _ACTIVE[key] = (obstacles, cells)
     try:
         yield
     finally:
-        if len(cells):
-            obstacles.remove_blocked_cells_batch(cells)
+        _ACTIVE.pop(key, None)
+        obstacles.remove_blocked_cells_batch(cells)
+
+
+@contextlib.contextmanager
+def also_on(copy, original, net_id: int):
+    """Put the flanks `original` holds for `net_id` on record for `copy`, a
+    clone taken while they were stamped (it carries the same cells)."""
+    entry = _ACTIVE.get((id(original), net_id))
+    if entry is None or copy is original:
+        yield
+        return
+    key = (id(copy), net_id)
+    _ACTIVE[key] = (copy, entry[1])
+    try:
+        yield
+    finally:
+        _ACTIVE.pop(key, None)
+
+
+def active(obstacles, net_id: int):
+    """The flank cells a `stamp` holds on `obstacles` for `net_id`, else None."""
+    entry = _ACTIVE.get((id(obstacles), net_id))
+    return None if entry is None else entry[1]
+
+
+@contextlib.contextmanager
+def lifted(obstacles, net_id: int):
+    """Take the flanks `stamp` holds on `obstacles` for `net_id` off the map
+    for the duration of the block (a route that found no way in through a
+    pad's end), and put them back."""
+    cells = active(obstacles, net_id)
+    if cells is not None:
+        obstacles.remove_blocked_cells_batch(cells)
+    try:
+        yield
+    finally:
+        if cells is not None:
+            obstacles.add_blocked_cells_batch(cells)
+
+
+#: BlockedCellTracker.get_blocked (rust_router) samples a frontier past this
+#: many cells; a frontier that long is not known to miss the flanks.
+FRONTIER_CAP = 10000
+
+
+def touched(obstacles, net_id: int, *frontiers) -> bool:
+    """True when a failed search's blocked-cell frontier (lists of (gx, gy,
+    layer)) reached a flank cell `stamp` holds on `obstacles` for `net_id`,
+    or may have (a sampled frontier); False when it provably did not."""
+    cells = active(obstacles, net_id)
+    if cells is None:
+        return False
+    if any(len(f) >= FRONTIER_CAP for f in frontiers if f):
+        return True
+    held = {(int(x), int(y), int(l)) for x, y, l in cells}
+    return any((int(c[0]), int(c[1]), int(c[2])) in held
+               for f in frontiers if f for c in f)

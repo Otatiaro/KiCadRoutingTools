@@ -213,8 +213,10 @@ def main():
     check('every _register_unblock_via call hands over its via and a ring list',
           len(sites) >= 4 and all(len(c.args) >= 9 for c in sites),
           f'{len(sites)} site(s), arg counts {[len(c.args) for c in sites]}')
+    # The ladder's body is _route_with_via_unblock_impl (the outer function
+    # only tries the row-pad flanks first, pad_entry).
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
-              and n.name == '_route_with_via_unblock')
+              and n.name == '_route_with_via_unblock_impl')
     fin = [t for t in ast.walk(fn) if isinstance(t, ast.Try) and t.finalbody
            and '_release_unblock_via_rings' in ast.unparse(t.finalbody)]
     check('_route_with_via_unblock releases its rings in a finally', bool(fin))

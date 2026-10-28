@@ -1154,7 +1154,8 @@ def try_tap_pad(
     # The net's row pads in the window (pad_entry): their flanks are blocked in
     # the trace map, so a trace lands on such a pad -- this one or a reuse
     # target -- through an end, along its axis, and no new via sits on a flank.
-    from pad_entry import block_window_flanks, via_site_on_flank, window_row_pads
+    from pad_entry import (block_window_flanks, via_flank_zones, via_site_on_flank,
+                           window_row_pads)
     _row_pads = (window_row_pads(pcb_data, net_id, pad_layer, pad.global_x,
                                  pad.global_y, half_size + _ITEM_MARGIN)
                  if pad_layer and pad_entry else [])
@@ -1272,9 +1273,10 @@ def try_tap_pad(
             return any(point_in_polygon(x, y, poly) for poly in _net_zone_polys)
     if _row_pads:
         _in_zone = zone_filter
+        _flank_zones = via_flank_zones(_row_pads, via_size, config)
 
         def zone_filter(x, y):
-            return (not via_site_on_flank(_row_pads, x, y, via_size, config)
+            return (not via_site_on_flank(_flank_zones, x, y)
                     and (_in_zone is None or _in_zone(x, y)))
 
     ghost_pref = None
@@ -1399,6 +1401,7 @@ def tap_pad_with_escalation(
     corridor_ghosts=None,
     ghost_exclude_ids=(),
     plane_tap: bool = False,
+    pad_entry: bool = True,
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
 
@@ -1406,7 +1409,10 @@ def tap_pad_with_escalation(
     fine-pitch row pads (try_tap_pad's ``pad_entry``). Only when every rung
     fails that way, and such a pad is in reach, is the ladder run again
     without the flanks -- a pad entered from its side is still a connected
-    pad -- and the console says so. See `_tap_ladder` for the rungs.
+    pad -- and the console says so; not for a tap that routes no trace.
+    ``pad_entry`` False runs the ladder once, flanks open: the #189 via-in-pad
+    rescue, which like every rescue of the route step runs without them.
+    See `_tap_ladder` for the rungs.
     """
     kwargs = dict(pending_pads=pending_pads, extra_vias=extra_vias,
                   extra_segments=extra_segments, verbose=verbose,
@@ -1418,8 +1424,12 @@ def tap_pad_with_escalation(
                   ghost_exclude_ids=ghost_exclude_ids, plane_tap=plane_tap)
     result = _tap_ladder(pad, pad_layer, net_id, pcb_data, config,
                          max_search_radius, via_size, via_drill,
-                         same_net_pad_clearance, pad_entry=True, **kwargs)
-    if result.success or not pad_layer:
+                         same_net_pad_clearance, pad_entry=pad_entry, **kwargs)
+    # A tap that routes no trace (a via in the pad, no reuse, no distant
+    # trace: the via-in-pad rescues) is the same with or without the flanks.
+    traces = (max_search_radius > 0 or distant_trace_radius > 0
+              or not disable_reuse or pour_trace_only)
+    if result.success or not pad_layer or not traces or not pad_entry:
         return result
     from pad_entry import window_row_pads
     reach = max(max_search_radius, distant_trace_radius) + _WINDOW_MARGIN + _ITEM_MARGIN
