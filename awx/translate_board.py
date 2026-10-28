@@ -18,6 +18,9 @@ s-expression, like rotate_board.py. Self-verifies by re-parsing.
 usage: translate_board.py IN.kicad_pcb OUT.kicad_pcb DX DY
 """
 import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+import os
 import shutil
 import sys
 

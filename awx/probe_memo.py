@@ -28,6 +28,9 @@ PROBE_MEMO=1 turns it on (a harness that probes the same bench again and
 again -- evolve.py and the chain scripts set it); PROBE_MEMO_DIR moves the
 store.
 """
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import glob
 import hashlib
 import json

@@ -12,6 +12,9 @@ Compares SEGMENTS and VIAS only -- uuids and the sibling project differ on
 every write and say nothing about the copper (the repo rule: never hash or
 whole-file-diff a .kicad_pcb to decide identity).
 """
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import contextlib
 import os
 import sys

@@ -17,9 +17,10 @@ from __future__ import annotations
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': ['routing', 'combined'], 'kind': 'actor'}
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import env_knobs
-from blas_threads import single_thread_if_main
-single_thread_if_main(__name__)  # before numpy loads: see blas_threads
 import sys
 import os
 import copy

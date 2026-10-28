@@ -7,6 +7,9 @@ into small K and measures a harder problem than the campaign's -- at
 K=8 the braid emits 593 DRC violations on the launch-y prefix and 0 on
 this one."""
 import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+import os
 import sys
 
 

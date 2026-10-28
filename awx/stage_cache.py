@@ -18,6 +18,9 @@ directory listing, a subprocess's reads.
 OFF BY DEFAULT: STAGE_CACHE=1 turns it on (a test harness redoing the same bench -- whole_route.py sets it); without it
 the stage runs and nothing is recorded. STAGE_CACHE_DIR is where entries live (default awx/tmp/stage_cache).
 """
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import atexit
 import contextlib
 import hashlib

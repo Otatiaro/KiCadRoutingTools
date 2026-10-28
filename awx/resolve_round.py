@@ -12,6 +12,9 @@ Prints the solve's own lines (whole_solve:, the workers', the tie vias) and the 
 """
 KRT_TOOL = {'scope': [], 'kind': 'actor'}   # a research tool (awx), catalogued, shown at no door
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import argparse
 import os
 import subprocess

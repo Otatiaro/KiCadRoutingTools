@@ -22,6 +22,9 @@ Exit status: 0 = all boards match, 1 = differences found, 2 = error.
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': [], 'kind': 'instrument'}
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import argparse

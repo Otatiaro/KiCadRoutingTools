@@ -11,6 +11,9 @@ the original solve did. Measured need: the chain's two fanout arms began
 with identical solves (8 s each of a 36 s arm), and the population's
 crossovers re-solve near-identical models. PROBE_MEMO=0 turns it off.
 """
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import hashlib
 import os
 import sys

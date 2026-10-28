@@ -46,6 +46,9 @@ from __future__ import annotations
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': ['routing'], 'kind': 'actor'}
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import _path  # noqa: F401  (#522: puts ../py_router on sys.path)
 
 import argparse
