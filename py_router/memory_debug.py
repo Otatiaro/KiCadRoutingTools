@@ -21,16 +21,51 @@ except ImportError:
     pass
 
 
+def _windows_working_set_bytes() -> int:
+    """This process's working set (what psutil reports as rss on Windows),
+    read through psapi with ctypes. psutil is not a dependency and Windows
+    has no `resource` module, so without this --debug-memory printed 0 MB
+    at every stage on Windows."""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    class _Counters(ctypes.Structure):  # PROCESS_MEMORY_COUNTERS
+        _fields_ = [('cb', wt.DWORD), ('PageFaultCount', wt.DWORD),
+                    ('PeakWorkingSetSize', ctypes.c_size_t),
+                    ('WorkingSetSize', ctypes.c_size_t),
+                    ('QuotaPeakPagedPoolUsage', ctypes.c_size_t),
+                    ('QuotaPagedPoolUsage', ctypes.c_size_t),
+                    ('QuotaPeakNonPagedPoolUsage', ctypes.c_size_t),
+                    ('QuotaNonPagedPoolUsage', ctypes.c_size_t),
+                    ('PagefileUsage', ctypes.c_size_t),
+                    ('PeakPagefileUsage', ctypes.c_size_t)]
+
+    c = _Counters()
+    c.cb = ctypes.sizeof(c)
+    # HANDLE(-1) is the current-process pseudo handle; a plain int argument
+    # is passed as a 32-bit value on 64-bit and the call fails.
+    if not ctypes.WinDLL('psapi').GetProcessMemoryInfo(wt.HANDLE(-1), ctypes.byref(c), c.cb):
+        return 0
+    return c.WorkingSetSize
+
+
 def get_process_memory_mb() -> float:
     """Get current process memory usage in MB.
 
     Tries multiple methods in order of reliability:
     1. psutil (most accurate, cross-platform)
-    2. resource (Unix only)
+    2. psapi through ctypes (Windows)
+    3. resource (Unix only)
     """
     if _HAS_PSUTIL:
         process = psutil.Process()
         return process.memory_info().rss / (1024 * 1024)
+
+    if sys.platform == 'win32':
+        try:
+            return _windows_working_set_bytes() / (1024 * 1024)
+        except (OSError, AttributeError):
+            return 0.0
 
     if _HAS_RESOURCE:
         # maxrss is in KB on Linux, bytes on macOS
