@@ -1213,6 +1213,8 @@ def anneal(model, movable: List[str], *, moves: int = 11000,
     'reseated' (parts moved to their nearest legal pose afterwards),
     'repaired' (the run never came clean and `Annealer.repair` mended it)}."""
     a = Annealer(model, movable, seed=seed, seats=seats)
+    if not moves:
+        a.lam = LAM_END     # no anneal: the overlap at its final weight, for the repair alone
     st = model.state
     for r, seat in a.seats.items():     # back on its edge after the scatter
         p = st.parts[r]

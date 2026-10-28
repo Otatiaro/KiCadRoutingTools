@@ -277,13 +277,19 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
         model_arity.append({'ref': s, 'near': p, 'max_mm': m, 'legs': len(legs),
                             'nets': nets,
                             'rails': [n for n in nets if n in rail_names]})
-    # congestion counts every net that is routed as tracks: all but ground,
-    # which is poured as a plane
-    cnets = sorted(n for n in state.net_refs if n and not is_ground(pcb.nets[n].name))
+    # congestion counts every net that is routed as tracks: all but ground
+    # and the --plane-nets, which are poured as planes
+    planes = set(getattr(args, 'plane_nets', None) or ())
+    cnets = sorted(n for n in state.net_refs if n and not is_ground(pcb.nets[n].name)
+                   and pcb.nets[n].name not in planes)
     model = Model(state, pcb, rails=view.rails, claims=claims,
                   decaps=decaps, supply=supply, decap_pins=decap_pins,
                   groups=groups, congestion_weight=args.congestion_weight,
                   track_pitch=args.track_pitch, congestion_nets=cnets,
+                  congestion_layers=getattr(args, 'congestion_layers', None),
+                  density_weight=getattr(args, 'density_weight', 0.0),
+                  density_cell=getattr(args, 'density_cell', 5.0),
+                  density_ratio=getattr(args, 'density_ratio', 1.5),
                   rail_weight=args.rail_weight,
                   ground_nets={n for n in view.rails if is_ground(pcb.nets[n].name)},
                   ground_weight=args.ground_weight, pad_weight=args.pad_weight,
@@ -729,6 +735,18 @@ def build_parser():
     ap.add_argument('--congestion-weight', type=float, default=5.0,
                     help='per mm^2 of routing overflow squared, summed over a 0.5 mm '
                          'grid (default 5)')
+    ap.add_argument('--congestion-layers', metavar='LAYER', nargs='+',
+                    help='the copper layers that carry tracks, for the congestion supply '
+                         '(default every copper layer; name only the signal layers when '
+                         'the inner ones are poured as planes)')
+    ap.add_argument('--density-weight', type=float, default=0.0,
+                    help="per mm^2 of courtyard area past --density-ratio x the board's mean "
+                         "fill in a --density-cell square, squared over the cell area "
+                         "(default 0: off)")
+    ap.add_argument('--density-cell', type=float, default=5.0,
+                    help="the density grid's cell, mm (default 5)")
+    ap.add_argument('--density-ratio', type=float, default=1.5,
+                    help="the fill a cell may hold, x the board's mean (default 1.5)")
     ap.add_argument('--track-pitch', type=float, default=0.33,
                     help='mm of board one track takes, width plus clearance, for the '
                          'congestion supply (default 0.33)')
@@ -757,6 +775,16 @@ def build_parser():
                          "force-directed placement (placement/force.py: nets pull, pads "
                          "repel at short range, an electrostatic density spreads the parts "
                          "over the free board) and anneal from it at a lower temperature")
+    ap.add_argument('--forced-accept', type=float, default=FORCED_ACCEPT,
+                    help=f"a forced start's anneal: how often the median uphill move is "
+                         f"taken at its start (default {FORCED_ACCEPT}; a scattered start: "
+                         f"0.1)")
+    ap.add_argument('--forced-reach', type=float, default=FORCED_REACH,
+                    help=f"a forced start's anneal: its first moves' reach, x a scattered "
+                         f"start's (default {FORCED_REACH})")
+    ap.add_argument('--forced-legalize-only', action='store_true',
+                    help="a forced start is only made legal (overlaps shoved apart, each part "
+                         "then to its nearest legal pose), not annealed")
     ap.add_argument('--force-param', metavar='KEY=VALUE', action='append',
                     help="a forced start's setting (placement/force.py ForceParams: "
                          "attraction, repulsion, bin_mm, lambda_rate, ...), repeatable")
@@ -1047,13 +1075,15 @@ def main(argv=None):
                       f"courtyard overlap {t.get('overlap_mm2', 0):.2f} mm2 in "
                       f"{int(t.get('overlap_pairs', 0))} pair(s) before the legalization")
                 at_force = {r: (st.parts[r].x, st.parts[r].y) for r in movable}
-                warm = {'accept': FORCED_ACCEPT, 'reach_scale': FORCED_REACH}
+                warm = {'accept': a.forced_accept, 'reach_scale': a.forced_reach}
             else:
                 simple_anneal.scatter(mdl, movable, seed=seed, clustered=clustered,
                                       anchored=anchored)
-            res = simple_anneal.anneal(mdl, movable, moves=moves, seed=seed,
+            legalize_only = forced and a.forced_legalize_only
+            res = simple_anneal.anneal(mdl, movable, moves=0 if legalize_only else moves, seed=seed,
                                        log=lambda s: print(f"  {s}"),
-                                       repair=k == RESTARTS, seats=mdl.edge_seats, **warm)
+                                       repair=legalize_only or k == RESTARTS, seats=mdl.edge_seats,
+                                       **warm)
             if forced:
                 # how far the anneal and the legality pass moved the forced start
                 d = [math.hypot(st.parts[r].x - at_force[r][0], st.parts[r].y - at_force[r][1])

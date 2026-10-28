@@ -114,6 +114,15 @@ class ForceParams:
     swap_every: int = 25            # steps between two swap passes (0: none)
     swap_from: float = 0.5          # swaps once the overflow is under this, until the relax
     swap_max: int = 50              # most moves one pass takes
+    move_every: int = 0             # steps between two part-move passes (0: none)
+    move_from: float = 0.25         # part moves once the overflow is under this, relax included
+    move_max: int = 50              # most part moves one pass takes
+    cross_mm: float = 2.0           # a crossing of two nets' trees, in mm of wire (the anneal's)
+    cross_weight: float = 0.0       # the smoothed crossing term, mm of wire per crossing (0: off)
+    cross_eps0: float = 2.0         # its smoothing width (mm) as the pads come in ...
+    cross_eps1: float = 0.3         # ... falling to this once they are in
+    cross_every: int = 25           # steps between two rebuilds of the trees and their near pairs
+    cross_margin_mm: float = 1.0    # a pair is near when its boxes are within this (+ 3 eps)
     snapshot_every: int = 0         # steps between two snapshots (0: phase changes only)
     edge_weight: float = 10.0       # k_edge, per mm^2 outside
     spread_sigma: float = 0.04      # start: jitter round the centre, x the board span
@@ -427,6 +436,218 @@ class SwapMoves:
         pass
 
 
+def cross_energy(A, B, C, D, eps):
+    """The smoothed crossing indicator of segment pairs AB, CD (each n x 2):
+    E = sum sigma(-s_C s_D / eps^2) sigma(-t_A t_B / eps^2), s the signed
+    distance to line AB, t to line CD -- 1 for a clear crossing, 0 for a pair
+    well apart, smooth between. Returns (E, dE/dA, dE/dB, dE/dC, dE/dD).
+
+    A point Q's distance to line P0P1 is s = n.(Q - P0), n the unit normal;
+    with p = Q's projection along P0P1 as a share of its length, ds/dQ = n,
+    ds/dP1 = -p n (the line turns about P0), ds/dP0 = -(1 - p) n."""
+    from scipy.special import expit
+
+    def side(P0, P1, Q):
+        e = P1 - P0
+        L = np.hypot(e[:, 0], e[:, 1]) + 1e-9
+        tau = e / L[:, None]
+        n = np.column_stack([-tau[:, 1], tau[:, 0]])
+        rel = Q - P0
+        return (n * rel).sum(1), (tau * rel).sum(1) / L, n
+
+    e2 = eps * eps
+    s1, pC, n1 = side(A, B, C)
+    s2, pD, _ = side(A, B, D)
+    t1, pA, n2 = side(C, D, A)
+    t2, pB, _ = side(C, D, B)
+    su, sv = expit(-s1 * s2 / e2), expit(-t1 * t2 / e2)
+    du, dv = su * (1 - su) * sv, sv * (1 - sv) * su
+    ds1, ds2 = -du * s2 / e2, -du * s1 / e2
+    dt1, dt2 = -dv * t2 / e2, -dv * t1 / e2
+    gA = -(ds1 * (1 - pC) + ds2 * (1 - pD))[:, None] * n1 + dt1[:, None] * n2
+    gB = -(ds1 * pC + ds2 * pD)[:, None] * n1 + dt2[:, None] * n2
+    gC = ds1[:, None] * n1 - (dt1 * (1 - pA) + dt2 * (1 - pB))[:, None] * n2
+    gD = ds2[:, None] * n1 - (dt1 * pA + dt2 * pB)[:, None] * n2
+    return float((su * sv).sum()), gA, gB, gC, gD
+
+
+class Ratsnest:
+    """The nets' trees: each net's Manhattan spanning tree over its pins and
+    fixed pads, plane nets aside (the attraction's nets, its block
+    pseudo-nets left out). An ENTRY is one such point."""
+
+    def __init__(self, prob: 'Problem'):
+        self.p = prob
+        keep = prob.a_kind != 2
+        self.e_kind, self.e_ref = prob.a_kind[keep], prob.a_ref[keep]
+        self.e_net = prob.a_net[keep]
+        pin = self.e_kind == 0
+        self.e_pin = pin
+        self._pin_ref = np.where(pin, self.e_ref, 0)
+        fr = np.where(pin, 0, self.e_ref)
+        self._fx = np.where(pin, 0.0, prob.fx_x[fr] if prob.fx_x.size else 0.0)
+        self._fy = np.where(pin, 0.0, prob.fx_y[fr] if prob.fx_y.size else 0.0)
+        self.e_body = np.where(pin, prob.pin_body[self._pin_ref], -1)
+        self.n_nets = int(prob.a_w.size)
+        self.w = prob.a_w
+        self.net_ents = [np.nonzero(self.e_net == n)[0] for n in range(self.n_nets)]
+
+    def _points(self, px, py):
+        """Every entry's position: a pin's at (px, py), a fixed pad's own."""
+        pin = self.e_pin
+        return np.where(pin, px[self._pin_ref], self._fx), np.where(pin, py[self._pin_ref], self._fy)
+
+    def trees(self, px, py, nets):
+        """The spanning trees of `nets` at pin positions (px, py), one scipy
+        call over the block-diagonal graph: (segments n x 4, their net, their
+        entries a / b, each net's tree length)."""
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import minimum_spanning_tree
+        ents = [self.net_ents[n] for n in nets]
+        ents = [e for e in ents if e.size >= 2]
+        length = np.zeros(self.n_nets)
+        if not ents:
+            return np.zeros((0, 4)), np.zeros(0, int), np.zeros(0, int), np.zeros(0, int), length
+        I, J = [], []
+        for e in ents:
+            i, j = np.triu_indices(e.size, 1)
+            I.append(e[i])
+            J.append(e[j])
+        I, J = np.concatenate(I), np.concatenate(J)
+        allx, ally = self._points(px, py)
+        d = np.abs(allx[I] - allx[J]) + np.abs(ally[I] - ally[J]) + 1e-6
+        n = self.e_net.size
+        t = minimum_spanning_tree(coo_matrix((d, (I, J)), shape=(n, n))).tocoo()
+        a, b = t.row, t.col
+        seg = np.column_stack([allx[a], ally[a], allx[b], ally[b]])
+        net = self.e_net[a]
+        np.add.at(length, net, t.data - 1e-6)
+        return seg, net, a, b, length
+
+
+class PartMoves(Ratsnest):
+    """The discrete moves the gradient cannot make, for `optimise` to try:
+    two parts trading places, or a two-pad part turned end for end. Pads and
+    courtyards repel, so two passives whose nets cross never pass each other
+    by sliding; a trade or a half turn does it in one step.
+
+    The candidates come from the crossings of the nets' trees (each net's
+    Manhattan spanning tree over its pins and fixed pads, plane nets aside):
+    each crossing's parts, a part that is no edge seat and carries no
+    template member. A trade takes two parts of one footprint (same box,
+    same pads) in one block, each to the other's pose, a two-pad one also
+    turned or not; a half turn takes a two-pad part. A move is priced
+    exactly on what it touches -- its nets' weighted tree length, the
+    crossings of their trees with every other tree at `cross_mm` each, the
+    springs -- and taken when it lowers that."""
+
+    def __init__(self, prob: 'Problem', P: 'ForceParams', block_of):
+        super().__init__(prob)
+        self.P = P
+        nb = prob.nb
+        self.body_nets = [np.unique(self.e_net[self.e_body == b]) for b in range(nb)]
+        pins_of = [np.nonzero(prob.pin_body == b)[0] for b in range(nb)]
+        self.pins_of = pins_of
+        anchors = np.bincount(prob.bx_body, minlength=nb) > 1
+        self.free = prob.turnable & ~anchors
+        self.two_pad = np.array([len(pins_of[b]) == 2 for b in range(nb)])
+        sig = {}
+        self.sig = np.zeros(nb, int)
+        for b in range(nb):
+            pts = sorted(zip(np.round(prob.pin_lx[pins_of[b]], 2), np.round(prob.pin_ly[pins_of[b]], 2)))
+            key = (tuple(np.round(prob.body_box[b], 2)), tuple(pts))
+            self.sig[b] = sig.setdefault(key, len(sig))
+        self.block = np.asarray(block_of, int)
+
+    def candidates(self, seg, a, b, cross_i, cross_j):
+        """The moves the crossings suggest: ('turn', b) and ('trade', b1, b2, f1, f2)."""
+        out = set()
+        free, two = self.free, self.two_pad
+        for i, j in zip(cross_i, cross_j):
+            Bi = {int(x) for x in self.e_body[[a[i], b[i]]] if x >= 0 and free[x]}
+            Bj = {int(x) for x in self.e_body[[a[j], b[j]]] if x >= 0 and free[x]}
+            for x in Bi | Bj:
+                if two[x]:
+                    out.add(('turn', x))
+            for x in Bi:
+                for y in Bj:
+                    if x == y or self.sig[x] != self.sig[y] or self.block[x] != self.block[y]:
+                        continue
+                    x_, y_ = min(x, y), max(x, y)
+                    for fx_ in ((0, 1) if two[x_] else (0,)):
+                        for fy_ in ((0, 1) if two[y_] else (0,)):
+                            out.add(('trade', x_, y_, fx_, fy_))
+        return sorted(out)
+
+    @staticmethod
+    def apply(move, X, Y, PHI):
+        """`move` on the poses (in place); returns the bodies it moved."""
+        if move[0] == 'turn':
+            b = move[1]
+            PHI[b] += math.pi
+            return (b,)
+        _k, x, y, fx_, fy_ = move
+        X[x], X[y] = X[y], X[x]
+        Y[x], Y[y] = Y[y], Y[x]
+        PHI[x], PHI[y] = PHI[y] + math.pi * fx_, PHI[x] + math.pi * fy_
+        return (x, y)
+
+    def run(self, K, X, Y, PHI, log=None, step=0):
+        """One pass on (X, Y, PHI), in place: every candidate priced at the
+        same start, then the best taken first, skipping any whose nets an
+        earlier one has touched. Returns the moves taken [(move, delta)]."""
+        from .simple import grid_router as gr
+        P = self.P
+        px, py, _qx, _qy = K.positions(X, Y, PHI)
+        seg, net, a, b, length = self.trees(px, py, range(self.n_nets))
+        if not seg.shape[0]:
+            return []
+        segc = np.ascontiguousarray(seg)
+        ci, cj = gr.seg_cross_pairs(segc, None, np.ascontiguousarray(net, dtype=np.int64))
+        cands = self.candidates(seg, a, b, ci, cj)
+        e0 = K.spring_energy(px, py)
+        priced = []
+        for mv in cands:
+            Xc, Yc, Pc = X.copy(), Y.copy(), PHI.copy()
+            moved = self.apply(mv, Xc, Yc, Pc)
+            nets = np.unique(np.concatenate([self.body_nets[m] for m in moved]))
+            if not nets.size and mv[0] == 'turn':
+                continue
+            qx, qy, _a, _b = K.positions(Xc, Yc, Pc)
+            touched = np.isin(net, nets)
+            old, rest = segc[touched], segc[~touched]
+            nseg, nnet, _na, _nb, nlen = self.trees(qx, qy, nets)
+            nseg = np.ascontiguousarray(nseg)
+
+            def cross(S, L):
+                if not S.shape[0]:
+                    return 0
+                c = gr.seg_crossings(S, np.ascontiguousarray(rest)) if rest.shape[0] else 0
+                return c + gr.seg_crossings(S, None, np.ascontiguousarray(L, dtype=np.int64))
+            dcross = cross(nseg, nnet) - cross(old, net[touched])
+            dwire = float(np.dot(self.w[nets], nlen[nets] - length[nets]))
+            dspring = K.spring_energy(qx, qy) - e0
+            delta = dwire + P.cross_mm * dcross + dspring
+            if delta < -1e-6:
+                priced.append((delta, mv, set(nets.tolist()), moved, dcross))
+        priced.sort(key=lambda t: t[0])
+        taken, busy_nets, busy_bodies = [], set(), set()
+        for delta, mv, nets, moved, dcross in priced:
+            if len(taken) >= P.move_max:
+                break
+            if nets & busy_nets or busy_bodies.intersection(moved):
+                continue
+            self.apply(mv, X, Y, PHI)
+            busy_nets |= nets
+            busy_bodies.update(moved)
+            taken.append((mv, round(delta, 3), int(dcross)))
+        if log and taken:
+            log(f"force step {step:4d}: {len(taken)} part move(s) of {len(cands)} candidate(s) "
+                f"over {len(ci)} crossing(s), {sum(t[1] for t in taken):+.1f} mm, "
+                f"crossings {sum(t[2] for t in taken):+d}")
+        return taken
+
+
 class Kernel:
     """E(X, Y, PHI) and its gradient, by term, on a `Problem`."""
 
@@ -459,6 +680,11 @@ class Kernel:
         self._boxes = None      # (centres at build, i, j, fixed i, fixed j)
         self.rebuilds = {'pads': 0, 'boxes': 0}
         self.measure_overlap = False    # price the overlap area even at k_ov 0
+        # the smoothed crossings: the trees, their near pairs (entries a, b of
+        # one segment, c, d of the other), the weight and width now
+        self.rn = Ratsnest(prob) if P.cross_weight > 0 else None
+        self._xp = None
+        self.cross_k, self.cross_eps = 0.0, P.cross_eps0
         # each face's charges: courtyard samples, then pad demands
         self._charges = {}
         for f in self.faces:
@@ -716,6 +942,58 @@ class Kernel:
         qy = Y[b] + s[b] * p.smp_lx + c[b] * p.smp_ly
         return px, py, qx, qy
 
+    def _spring_rows(self, px, py):
+        """Each spring's nearest candidate row at pin positions (px, py):
+        (row, dx, dy, d, over), `over` its stretch past its free length."""
+        p = self.p
+        mv = p.sp_tpin >= 0
+        tx = np.where(mv, px[np.maximum(p.sp_tpin, 0)], p.sp_tx)
+        ty = np.where(mv, py[np.maximum(p.sp_tpin, 0)], p.sp_ty)
+        dx, dy = px[p.sp_subj] - tx, py[p.sp_subj] - ty
+        d2 = dx * dx + dy * dy
+        # the nearest row per spring: sort by (spring, d2), first of each
+        o = np.lexsort((d2, p.sp_id))
+        first = np.ones(o.size, bool)
+        first[1:] = p.sp_id[o][1:] != p.sp_id[o][:-1]
+        row = o[first]
+        d = np.sqrt(d2[row]) + 1e-9
+        return row, dx[row], dy[row], d, np.maximum(0.0, d - p.sp_free[p.sp_id[row]])
+
+    def spring_energy(self, px, py):
+        """The springs' energy at pin positions (px, py)."""
+        if not self.p.sp_id.size:
+            return 0.0
+        over = self._spring_rows(px, py)[4]
+        return float(self.P.claim_weight * np.sum(over * over))
+
+    def rebuild_crossings(self, px, py):
+        """The trees at pin positions (px, py) and their pairs of segments of
+        two nets whose boxes are within `cross_margin_mm` + 3 eps."""
+        rn = self.rn
+        seg, net, a, b, _l = rn.trees(px, py, range(rn.n_nets))
+        if seg.shape[0] < 2:
+            self._xp = None
+            return 0
+        lo = np.minimum(seg[:, :2], seg[:, 2:])
+        hi = np.maximum(seg[:, :2], seg[:, 2:])
+        mid, half = (lo + hi) / 2, (hi - lo) / 2
+        m = self.P.cross_margin_mm + 3.0 * self.cross_eps
+        tree = self._tree(mid)
+        reach = np.hypot(half[:, 0], half[:, 1]) + float(np.hypot(half[:, 0], half[:, 1]).max()) + m
+        I, J = [], []
+        for i, js in enumerate(tree.query_ball_point(mid, reach)):
+            js = np.asarray(js, int)
+            js = js[js > i]
+            I.append(np.full(js.size, i))
+            J.append(js)
+        i, j = np.concatenate(I), np.concatenate(J)
+        keep = ((net[i] != net[j])
+                & (np.abs(mid[i, 0] - mid[j, 0]) <= half[i, 0] + half[j, 0] + m)
+                & (np.abs(mid[i, 1] - mid[j, 1]) <= half[i, 1] + half[j, 1] + m))
+        i, j = i[keep], j[keep]
+        self._xp = (a[i], b[i], a[j], b[j])
+        return i.size
+
     def _acc(self, g, fx, fy, x, y, body, X, Y):
         nb = self.p.nb
         g[0] += np.bincount(body, fx, nb)
@@ -757,19 +1035,7 @@ class Kernel:
         # springs: each to its nearest candidate
         T['springs'] = 0.0
         if p.sp_id.size:
-            mv = p.sp_tpin >= 0
-            tx = np.where(mv, px[np.maximum(p.sp_tpin, 0)], p.sp_tx)
-            ty = np.where(mv, py[np.maximum(p.sp_tpin, 0)], p.sp_ty)
-            dx, dy = px[p.sp_subj] - tx, py[p.sp_subj] - ty
-            d2 = dx * dx + dy * dy
-            # the nearest row per spring: sort by (spring, d2), first of each
-            o = np.lexsort((d2, p.sp_id))
-            first = np.ones(o.size, bool)
-            first[1:] = p.sp_id[o][1:] != p.sp_id[o][:-1]
-            row = o[first]
-            dx, dy = dx[row], dy[row]
-            d = np.sqrt(d2[row]) + 1e-9
-            over = np.maximum(0.0, d - p.sp_free[p.sp_id[row]])
+            row, dx, dy, d, over = self._spring_rows(px, py)
             T['springs'] = float(P.claim_weight * np.sum(over * over))
             f = 2 * P.claim_weight * over / d
             s = p.sp_subj[row]
@@ -780,6 +1046,20 @@ class Kernel:
                 k2 = tp[m]
                 self._acc(g, -(f * dx)[m], -(f * dy)[m], px[k2], py[k2], p.pin_body[k2], X, Y)
         t0 = self._t('springs', t0)
+        # smoothed crossings of the nets' trees, on the pairs found at the last rebuild
+        T['crossings'] = 0.0
+        if self.cross_k > 0 and self._xp is not None and self._xp[0].size:
+            rn = self.rn
+            ex, ey = rn._points(px, py)
+            pts = [np.column_stack([ex[e], ey[e]]) for e in self._xp]
+            E, *G = cross_energy(*pts, self.cross_eps)
+            T['crossings'] = self.cross_k * E
+            for e, ge in zip(self._xp, G):
+                m = rn.e_pin[e]
+                pin = rn._pin_ref[e[m]]
+                self._acc(g, self.cross_k * ge[m, 0], self.cross_k * ge[m, 1], px[pin], py[pin],
+                          p.pin_body[pin], X, Y)
+        t0 = self._t('crossings', t0)
         # functional blocks: E = k_group sum w_i (|x_i - c| - R)+^2, c the
         # block's weighted centre (its own dependence on x_i included), so
         # a member strayed out of its block is pulled home and one inside
@@ -1244,8 +1524,15 @@ def build_problem(model, movable, P: ForceParams, plane_nets=(), seed: int = 0):
             gr.append(P.group_free * math.sqrt(float(mass[bs].sum()) / (math.pi * fill)))
         prob.gm_body, prob.gm_grp = A(gb, int), A(gg, int)
         prob.gm_w, prob.g_R = mass[prob.gm_body] if gb else np.zeros(0), A(gr)
+    # each body's block (-1: none), for the part moves: a trade stays in one
+    block_of = np.full(nb, -1)
+    for gi, (_n, members) in enumerate(block_list(model, mov, P.group_source == 'sheet')):
+        for r in members:
+            b = bidx.get(r)
+            if b is not None and block_of[b] < 0:
+                block_of[b] = gi
     meta = {'bodies': bodies, 'bidx': bidx, 'rider_of': rider_of, 'seats': seats,
-            'pin_key': pin_key,
+            'pin_key': pin_key, 'block_of': block_of,
             'base': np.array([st.parts[r].orig_rot % 90.0 for r in bodies]),
             'claim_rows': claim_rows, 'decap_rows': decap_rows}
     return prob, X, Y, PHI, meta
@@ -1294,7 +1581,7 @@ def match_decaps(decap_rows, px, py, free):
 
 
 def optimise(prob: Problem, P: ForceParams, X, Y, PHI, *, base, claim_rows=(), decap_rows=(),
-             project=None, log=None, swaps=None, snapshot=None):
+             project=None, log=None, swaps=None, snapshot=None, parts=None):
     """Lower the energy from (X, Y, PHI): Nesterov with a Barzilai-Borwein
     step, lambda rising each step, the turns rounded to `base` + k x 90
     once the overflow falls under `turn_overflow`, then `relax` steps with
@@ -1303,7 +1590,9 @@ def optimise(prob: Problem, P: ForceParams, X, Y, PHI, *, base, claim_rows=(), d
     `swaps` (a `SwapMoves`) is tried every `swap_every` steps once the
     blocks have formed and before the relax (the overflow under
     `swap_from`): each allowed move priced on the nets it touches alone,
-    the best that lowers the wire taken, until none does.
+    the best that lowers the wire taken, until none does. `parts` (a
+    `PartMoves`) is run every `move_every` steps once the overflow is under
+    `move_from`, the relax included; the momentum restarts after any move.
     `snapshot(info)` is called every `snapshot_every` steps and at each
     phase change; its time is kept out of the measured time.
     Returns (X, Y, PHI, summary)."""
@@ -1313,6 +1602,8 @@ def optimise(prob: Problem, P: ForceParams, X, Y, PHI, *, base, claim_rows=(), d
     snap_s = [0.0]
     swap_log: List[dict] = []
     swap_s = [0.0]
+    move_log: List[dict] = []
+    move_s = [0.0]
 
     def emit(phase, step, u_, lam_, T_, gv_):
         if snapshot is None:
@@ -1426,6 +1717,16 @@ def optimise(prob: Problem, P: ForceParams, X, Y, PHI, *, base, claim_rows=(), d
         gamma = gamma_for(tau)
         # pad repulsion and overlap come in as the parts spread, and stay
         K.rep = 1.0 if K.rep >= 1.0 else ramp(tau)
+        # the smoothed crossings come in with them, their width narrowing
+        if K.rn is not None and K.rep > 0:
+            K.cross_k = P.cross_weight * K.rep
+            K.cross_eps = P.cross_eps0 + (P.cross_eps1 - P.cross_eps0) * K.rep
+            if K._xp is None or step % P.cross_every == 0:
+                px_, py_, _q, _r = K.positions(u[:nb], u[nb:2 * nb], u[2 * nb:] / rg)
+                n_pairs = K.rebuild_crossings(px_, py_)
+                if log and step % 250 == 0:
+                    log(f"force step {step:4d}: {n_pairs} near pair(s) of tree segments, "
+                        f"eps {K.cross_eps:.2f} mm")
         # the courtyard overlap: off while the parts spread, then rising
         # each step until it dominates (the turns are held by then)
         if relax_left is not None:
@@ -1437,11 +1738,27 @@ def optimise(prob: Problem, P: ForceParams, X, Y, PHI, *, base, claim_rows=(), d
                 and relax_left is None and tau < P.swap_from):
             if try_swaps(u, step, lam):
                 T, gv = grad(v, lam, gamma, held)
+        if parts is not None and P.move_every and step % P.move_every == 0 and tau < P.move_from:
+            t = _time.perf_counter()
+            Xm, Ym, PHm = u[:nb].copy(), u[nb:2 * nb].copy(), u[2 * nb:] / rg
+            taken = parts.run(K, Xm, Ym, PHm, log=log, step=step)
+            if taken:
+                if held is not None:
+                    for mv, _d, _c in taken:
+                        for b_ in ((mv[1],) if mv[0] == 'turn' else mv[1:3]):
+                            held[b_] = PHm[b_]
+                u = proj(np.concatenate([Xm, Ym, PHm * rg]), held)
+                v = u.copy()
+                a_k, v_prev, g_prev, alpha = 1.0, None, None, 0.0
+                T, gv = grad(v, lam, gamma, held)
+                move_log.extend({'step': step, 'move': list(map(str, mv)), 'delta_mm': d_, 'crossings': c_}
+                                for mv, d_, c_ in taken)
+            move_s[0] += _time.perf_counter() - t
         if snapshot is not None and P.snapshot_every and step % P.snapshot_every == 0:
             emit('spread' if relax_left is None else 'overlap rises', step, u, lam, T, gv)
         if log and (step == 1 or step % 50 == 0):
             log(f"force step {step:4d}: overflow {tau:.3f} lambda {lam:.3g} gamma {gamma:.2f} "
-                f"wire {T.get('wire', 0.0):.0f} springs {T['springs']:.1f} groups {T['groups']:.1f} pads {T['pads']:.1f} "
+                f"wire {T.get('wire', 0.0):.0f} springs {T['springs']:.1f} crossings {T.get('crossings', 0.0):.1f} groups {T['groups']:.1f} pads {T['pads']:.1f} "
                 f"bounds {T['bounds']:.2f} overlap {T['overlap_mm2']:.1f} mm2 "
                 f"({T['overlap_pairs']} pairs, k {K.kov:.3g})")
         if held is None and (tau < P.turn_overflow or step >= P.iters):
@@ -1476,8 +1793,8 @@ def optimise(prob: Problem, P: ForceParams, X, Y, PHI, *, base, claim_rows=(), d
         'steps': step, 'turns_rounded_at': rounded_at, 'overflow': round(Tf['overflow'], 4),
         'lambda': lam, 'gamma': round(gamma, 4), 'seconds': round(total, 2),
         'snapshot_seconds': round(snap_s[0], 2), 'swap_seconds': round(swap_s[0], 2),
-        'swaps': swap_log,
-        'ms_per_step': round(1000.0 * (total - swap_s[0]) / max(1, step), 2),
+        'swaps': swap_log, 'part_moves': move_log, 'part_move_seconds': round(move_s[0], 2),
+        'ms_per_step': round(1000.0 * (total - swap_s[0] - move_s[0]) / max(1, step), 2),
         'seconds_by_term': {k: round(v_, 2) for k, v_ in K.time.items()},
         'rebuilds': dict(K.rebuilds),
         'terms': {k: round(float(v_), 3) for k, v_ in Tf.items()}}
@@ -1531,7 +1848,8 @@ def place(model, movable: Sequence[str], *, seed: int = 0, params: Optional[Forc
                                   claim_rows=meta['claim_rows'], decap_rows=meta['decap_rows'],
                                   project=project, log=log,
                                   swaps=swaps(meta) if swaps is not None else None,
-                                  snapshot=snap if snapshot is not None else None)
+                                  snapshot=snap if snapshot is not None else None,
+                                  parts=PartMoves(prob, P, meta['block_of']) if P.move_every else None)
     for r, b in bidx.items():
         rot = round((-math.degrees(PHI[b])) % 360.0, 6) % 360.0
         st.parts[r].ensure_rotation(rot)

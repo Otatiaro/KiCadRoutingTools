@@ -376,7 +376,8 @@ class Model:
                  crossing_weight: float, claim_weight: float, decap_weight: float,
                  group_weight: float, congestion_weight: float = 0.0,
                  track_pitch: float = 0.33, cell: float = 0.5,
-                 congestion_nets=None, rail_weight: float = 0.0,
+                 congestion_nets=None, congestion_layers=None, rail_weight: float = 0.0,
+                 density_weight: float = 0.0, density_cell: float = 5.0, density_ratio: float = 1.5,
                  ground_nets=(), ground_weight: float = 0.0, pad_weight: float = 0.0,
                  hints: Sequence[Dict] = (), halo_coef: float = 0.25,
                  halo_weight: float = 10.0, claim_limits: Sequence = (),
@@ -397,6 +398,8 @@ class Model:
         self.rnets = sorted(n for n in rails if n and state.net_refs.get(n)
                             and (ground_weight if n in self.ground else rail_weight) > 0)
         self.qw, self.pitch, self.cell = congestion_weight, track_pitch, cell
+        # courtyard density: each cell's area past density_ratio x the mean fill
+        self.yw, self.den_cell, self.den_ratio = density_weight, density_cell, density_ratio
         # the nets that need channels: every signal net and every rail but
         # the ones poured as planes (the caller's `congestion_nets`)
         self.cnets = sorted(congestion_nets if congestion_nets is not None else self.nets)
@@ -404,7 +407,9 @@ class Model:
         self._gx0, self._gy0 = b[0], b[1]
         self._nx = max(1, int(math.ceil((b[2] - b[0]) / cell)))
         self._ny = max(1, int(math.ceil((b[3] - b[1]) / cell)))
-        self.layers = list(pcb.board_info.copper_layers or ['F.Cu', 'B.Cu'])
+        # the layers that carry tracks: every copper layer unless the caller
+        # names them (inner layers poured as planes carry none)
+        self.layers = list(congestion_layers or pcb.board_info.copper_layers or ['F.Cu', 'B.Cu'])
         self.claims = claims            # [(subject, partner, [(spad, ppads)])]
         # each claim's limit (its `max_mm`, pad edge), where it has one: the
         # hinge past it is priced at `claim_limit_weight` per mm (`claim_over`)
@@ -1274,6 +1279,103 @@ class Model:
         pend = getattr(self, '_cong_pending', None)
         return pend[2] if pend is not None else self._S
 
+    # -- courtyard density ------------------------------------------------------
+    def _den_cover(self, rect):
+        """`rect`'s area in each density cell it reaches: (i0, i1, j0, j1, block)."""
+        h, x0, y0 = self.den_cell, self._dx0, self._dy0
+        i0 = max(0, int((rect[0] - x0) // h))
+        i1 = min(self._dnx, int(math.ceil((rect[2] - x0) / h)))
+        j0 = max(0, int((rect[1] - y0) // h))
+        j1 = min(self._dny, int(math.ceil((rect[3] - y0) / h)))
+        if i1 <= i0 or j1 <= j0:
+            return (0, 0, 0, 0, np.zeros((0, 0)))
+        xs = x0 + h * np.arange(i0, i1 + 1)
+        ys = y0 + h * np.arange(j0, j1 + 1)
+        ox = np.clip(np.minimum(xs[1:], rect[2]) - np.maximum(xs[:-1], rect[0]), 0.0, None)
+        oy = np.clip(np.minimum(ys[1:], rect[3]) - np.maximum(ys[:-1], rect[1]), 0.0, None)
+        return (i0, i1, j0, j1, ox[:, None] * oy[None, :])
+
+    def _den_over2(self, O, cap):
+        over = np.clip(O - cap, 0.0, None)
+        return float((over * over).sum()) / (self.den_cell * self.den_cell)
+
+    def _den_init(self):
+        """The movable parts' courtyard area per cell from scratch, each
+        cell's allowance (`den_ratio` x their mean fill of the free board,
+        over the cell's area the locked parts leave free) and the excess
+        total -- what a move then corrects. A locked part's own cell is no
+        excess the anneal could clear: it only takes the room it covers."""
+        st = self.state
+        x0, y0, x1, y1 = st.usable
+        h = self.den_cell
+        self._dx0, self._dy0 = x0, y0
+        self._dnx = max(1, int(math.ceil((x1 - x0) / h)))
+        self._dny = max(1, int(math.ceil((y1 - y0) / h)))
+        skip = set(getattr(st, 'container_refs', ()) or ())
+        # a decap or a claim's subject is held where its claim puts it, at
+        # its pin: the crowd round a chip is wanted there, not an excess
+        tethered = {c[0] for c in self.claims} | {r for _n, caps, _s in self.clusters for r in caps}
+        self._drect = {r: p.rect() for r, p in st.parts.items()
+                       if r not in skip and not p.locked and r not in tethered}
+        self._O = np.zeros((self._dnx, self._dny))
+        for rect in self._drect.values():
+            i0, i1, j0, j1, blk = self._den_cover(rect)
+            self._O[i0:i1, j0:j1] += blk
+        A = self._den_cover((x0, y0, x1, y1))[4].copy()
+        for r, p in st.parts.items():
+            if p.locked and r not in skip:
+                i0, i1, j0, j1, blk = self._den_cover(p.rect())
+                A[i0:i1, j0:j1] -= blk
+        A = np.clip(A, 0.0, None)
+        fill = float(self._O.sum()) / max(1e-9, float(A.sum()))
+        self._dcap = self.den_ratio * fill * A
+        self._DS = self._den_over2(self._O, self._dcap)
+        self._den_pending = None
+
+    def _den_price(self, refs):
+        """The density excess with `refs` at their live poses, kept as pending."""
+        rects = [(r, self._drect[r], self.state.parts[r].rect()) for r in refs if r in self._drect]
+        covs = [(sign, self._den_cover(rc)) for _r, old, new in rects
+                for sign, rc in ((-1.0, old), (1.0, new)) if rc is not None]
+        covs = [(s, c) for s, c in covs if c[1] > c[0]]
+        if not covs:
+            self._den_pending = (rects, self._DS)
+            return self._DS
+        i0, i1 = min(c[0] for _s, c in covs), max(c[1] for _s, c in covs)
+        j0, j1 = min(c[2] for _s, c in covs), max(c[3] for _s, c in covs)
+        O = self._O[i0:i1, j0:j1]
+        cap = self._dcap[i0:i1, j0:j1]
+        N = O.copy()
+        for s, (a0, a1, b0, b1, blk) in covs:
+            N[a0 - i0:a1 - i0, b0 - j0:b1 - j0] += s * blk
+        S = self._DS + self._den_over2(N, cap) - self._den_over2(O, cap)
+        self._den_pending = (rects, S)
+        return S
+
+    def _den_commit(self):
+        pend = getattr(self, '_den_pending', None)
+        if pend is None:
+            return
+        rects, S = pend
+        for r, old, new in rects:
+            for sign, rc in ((-1.0, old), (1.0, new)):
+                if rc is not None:
+                    i0, i1, j0, j1, blk = self._den_cover(rc)
+                    self._O[i0:i1, j0:j1] += sign * blk
+            self._drect[r] = new
+        self._DS = S
+        self._den_pending = None
+
+    def density(self):
+        """Sum over cells of the courtyard area past the allowance, squared
+        (per cell area): the pending move's when one is being priced."""
+        if self.yw <= 0:
+            return 0.0
+        if getattr(self, '_O', None) is None:
+            self._den_init()
+        pend = getattr(self, '_den_pending', None)
+        return pend[1] if pend is not None else self._DS
+
     def snapshot(self, touched, refs):
         """What pricing a move of `refs` changes, to put back if the move is
         refused: the touched nets' trees (congestion is only pending)."""
@@ -1287,6 +1389,7 @@ class Model:
             if W is not None:
                 self._wh[n] = W
         self._cong_pending = None
+        self._den_pending = None
         self._pend = None
 
     def total(self):
@@ -1313,15 +1416,19 @@ class Model:
         if self.qw > 0:
             self._cong_init()       # from scratch: total() is the reference
         cong = self.congestion()
+        if self.yw > 0:
+            self._den_init()
+        den = self.density()
         pads = self.pad_crossings() if self.pw_pad > 0 else 0.0
         lim = self._limits_all()
         return {'wire': wire, 'crossings': cross, 'claims': claims, 'decaps': dec,
                 'groups': grp, 'per_group': per_group, 'hints': hint, 'per_hint': per_hint,
-                'halo': halo, 'congestion': cong, 'pad_hits': pads, 'decap_limits': lim,
+                'halo': halo, 'congestion': cong, 'density': den, 'pad_hits': pads, 'decap_limits': lim,
                 'decap_broken': self.limits_broken(), 'claim_limits': cover,
                 'claim_broken': self.claims_broken(), 'template': tmpl,
                 'cost': (wire + self.cw * cross + self.kw * claims + self.dw * dec
-                         + self.gw * grp + hint + halo + self.qw * cong + self.pw_pad * pads
+                         + self.gw * grp + hint + halo + self.qw * cong + self.yw * den
+                         + self.pw_pad * pads
                          + self._lw * lim + self.klw * cover + self.tw * tmpl)}
 
     # -- the intent's decap limits ---------------------------------------------
@@ -1877,6 +1984,8 @@ class Model:
             return
         if self.qw > 0:
             self._cong_commit()
+        if self.yw > 0:
+            self._den_commit()
         pend = getattr(self, '_pend', None)
         if pend is not None:
             self._commit_breakdowns(pend)
@@ -2007,6 +2116,7 @@ class Model:
             cover = sum(self._clo[id(c)] for c in cl)
             dec = sum(self._dcc[k] for k in dc)
             self._cong_pending = None
+            self._den_pending = None
             self._pend = None
             wire = sum(self.wire_weight(n) * self.net_len[n] for n in nets)
             tset, rset = set(T), set(R)
@@ -2028,7 +2138,7 @@ class Model:
             lim = sum(self._over_limit(i, self._lval[i]) for i in ls)
             tmpl = sum(self._tpc[i] for i in ts)
             return (wire + self.cw * cross + self.kw * claims + self.dw * dec
-                    + self.gw * grp + hint + halo + self.qw * self.congestion()
+                    + self.gw * grp + hint + halo + self.qw * self.congestion() + self.yw * self.density()
                     + self.pw_pad * pads + self._lw * lim + self.klw * cover
                     + self.tw * tmpl)
         ccl = {id(c): self.claim_cost(c) for c in cl}
@@ -2045,6 +2155,11 @@ class Model:
                 self._cong_init()
             else:
                 self._cong_price(refs)
+        if self.yw > 0:
+            if getattr(self, '_O', None) is None:
+                self._den_init()
+            else:
+                self._den_price(refs)
         wire = sum(self.wire_weight(n) * self.net_len[n] for n in nets)
         ctp = {i: self.template_cost(i) for i in ts}
         pend = {'R': R, 'T': T, 'claims': ccl, 'claim_over': cco, 'decaps': cdc,
@@ -2070,7 +2185,7 @@ class Model:
         self._moving = frozenset()
         return (wire + self.cw * cross + self.kw * claims + self.dw * dec
                 + self.gw * sum(groups.values()) + sum(pend['hints'].values())
-                + sum(pend['halo'].values()) + self.qw * self.congestion()
+                + sum(pend['halo'].values()) + self.qw * self.congestion() + self.yw * self.density()
                 + self.pw_pad * pads + self._lw * lim + self.klw * cover
                 + self.tw * sum(ctp.values()))
 
