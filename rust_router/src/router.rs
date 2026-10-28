@@ -3,9 +3,50 @@
 use pyo3::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::obstacle_map::GridObstacleMap;
 use crate::types::{GridState, OpenEntry, RouteStats, SearchSink, StatsSink, FrontierSink, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
+
+/// A flag one thread raises to stop a search running in another.
+///
+/// The searches release the GIL, so Python can run two of them at once on
+/// threads (e.g. the forward and backward full searches of one connection).
+/// When the result of one makes the other moot, `cancel()` ends the other at
+/// its next iteration; a cancelled search returns no path and no frontier,
+/// and its caller must discard it. A token is single-use: never reset.
+#[pyclass]
+#[derive(Default)]
+pub struct SearchCancel {
+    flag: Arc<AtomicBool>,
+}
+
+#[pymethods]
+impl SearchCancel {
+    #[new]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+}
+
+/// The cancel flag of an optional token, as a value a GIL-free closure can own.
+fn cancel_flag(cancel: Option<&SearchCancel>) -> Option<Arc<AtomicBool>> {
+    cancel.map(|c| Arc::clone(&c.flag))
+}
+
+#[inline]
+fn is_cancelled(flag: &Option<Arc<AtomicBool>>) -> bool {
+    flag.as_ref().map_or(false, |f| f.load(Ordering::Relaxed))
+}
 
 /// Direction octant 0-7 for a unit step (soft-knobs N5: angle-proportional
 /// turn cost -- octant delta * 45 degrees is the turn angle).
@@ -1104,10 +1145,14 @@ impl GridRouter {
     /// ceiling. 0 (the default) disables: existing callers are unchanged.
     ///
     /// C1: thin wrapper over the shared GridSearch core with a StatsSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, via_rung=0))]
+    ///
+    /// The search runs with the GIL released; `cancel` (a SearchCancel) lets
+    /// another thread stop it (see SearchCancel).
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, via_rung=0, cancel=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_multi(
         &self,
+        py: Python<'_>,
         obstacles: &GridObstacleMap,
         sources: Vec<(i32, i32, u8)>,
         targets: Vec<(i32, i32, u8)>,
@@ -1123,7 +1168,10 @@ impl GridRouter {
         quantum_pct: f64,
         grace_tranches: u32,
         via_rung: usize,
+        cancel: Option<&SearchCancel>,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, std::collections::HashMap<String, f64>) {
+        let flag = cancel_flag(cancel);
+        py.allow_threads(|| {
         let mut opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
                                       start_direction, end_direction,
                                       direction_steps, track_margin);
@@ -1134,6 +1182,9 @@ impl GridRouter {
         sink.stats.initial_h = search.initial_h;
 
         loop {
+            if is_cancelled(&flag) {
+                break;
+            }
             match search.step(self, obstacles, &mut sink) {
                 SearchStep::Found(goal_idx, g) => {
                     let path = search.store.reconstruct_path(goal_idx);
@@ -1166,6 +1217,7 @@ impl GridRouter {
         sink.stats.closed_set_size = search.store.closed_len();
         let stats_dict = self.stats_to_dict(&sink.stats);
         (None, search.iterations, stats_dict)
+        })
     }
 
     /// Route with frontier analysis - returns blocked cells on failure.
@@ -1182,10 +1234,14 @@ impl GridRouter {
     /// 0 (the default) disables.
     ///
     /// C1: thin wrapper over the shared GridSearch core with a FrontierSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, via_rung=0))]
+    ///
+    /// The search runs with the GIL released; a cancelled search (see
+    /// SearchCancel) returns no path and an empty frontier.
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, via_rung=0, cancel=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_with_frontier(
         &self,
+        py: Python<'_>,
         obstacles: &GridObstacleMap,
         sources: Vec<(i32, i32, u8)>,
         targets: Vec<(i32, i32, u8)>,
@@ -1201,7 +1257,10 @@ impl GridRouter {
         quantum_pct: f64,
         grace_tranches: u32,
         via_rung: usize,
+        cancel: Option<&SearchCancel>,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, Vec<(i32, i32, u8)>) {
+        let flag = cancel_flag(cancel);
+        py.allow_threads(|| {
         let mut opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
                                       start_direction, end_direction,
                                       direction_steps, track_margin);
@@ -1211,6 +1270,9 @@ impl GridRouter {
         search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches);
 
         loop {
+            if is_cancelled(&flag) {
+                return (None, search.iterations, Vec::new());
+            }
             match search.step(self, obstacles, &mut sink) {
                 SearchStep::Found(goal_idx, _g) => {
                     let path = search.store.reconstruct_path(goal_idx);
@@ -1222,6 +1284,7 @@ impl GridRouter {
         }
 
         (None, search.iterations, sink.tracker.get_blocked())
+        })
     }
 }
 
