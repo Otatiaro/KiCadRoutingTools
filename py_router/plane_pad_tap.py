@@ -1039,8 +1039,14 @@ def try_tap_pad(
     corridor_ghosts=None,
     ghost_exclude_ids=(),
     plane_tap: bool = False,
+    pad_entry: bool = True,
 ) -> TapResult:
     """Attempt to connect one pad to the plane with the given parameters.
+
+    ``pad_entry`` (pad_entry.py): the trace map blocks the flanks of the net's
+    fine-pitch row pads in the window and no new via sits on one, so the
+    trace lands through a pad's end. tap_pad_with_escalation passes False
+    only to its last-resort ladder.
 
     ``plane_tap`` (#1179): the tap exists to reach the PLANE, so a via whose
     site meets the net's pour on no layer but the pad's own is dropped (see
@@ -1145,6 +1151,14 @@ def try_tap_pad(
             local, config, net_id, verbose=False,
             same_net_pad_clearance=same_net_pad_clearance)
     routing_obs = None
+    # The net's row pads in the window (pad_entry): their flanks are blocked in
+    # the trace map, so a trace lands on such a pad -- this one or a reuse
+    # target -- through an end, along its axis, and no new via sits on a flank.
+    from pad_entry import (block_window_flanks, via_flank_zones, via_site_on_flank,
+                           window_row_pads)
+    _row_pads = (window_row_pads(pcb_data, net_id, pad_layer, pad.global_x,
+                                 pad.global_y, half_size + _ITEM_MARGIN)
+                 if pad_layer and pad_entry else [])
     # The routing-obstacle map is consulted ONLY to route a via->pad TRACE -- i.e.
     # when reusing nearby same-net copper (steps 1/1b, gated on not disable_reuse),
     # for the distant-trace fallback (distant_trace_radius>0), or when
@@ -1169,6 +1183,7 @@ def try_tap_pad(
         routing_obs = build_routing_obstacle_map(
             local, routing_config, net_id, pad_layer,
             skip_pad_blocking=False, verbose=False)
+        block_window_flanks(routing_obs, _row_pads, config)
         if corridor_ghosts is not None:
             # #517 arm 2: steer this tap's trace away from OTHER rips'
             # vacated corridors (single-layer map: this layer is index 0).
@@ -1256,6 +1271,13 @@ def try_tap_pad(
 
         def zone_filter(x, y):
             return any(point_in_polygon(x, y, poly) for poly in _net_zone_polys)
+    if _row_pads:
+        _in_zone = zone_filter
+        _flank_zones = via_flank_zones(_row_pads, via_size, config)
+
+        def zone_filter(x, y):
+            return (not via_site_on_flank(_flank_zones, x, y)
+                    and (_in_zone is None or _in_zone(x, y)))
 
     ghost_pref = None
     if corridor_ghosts is not None:
@@ -1322,6 +1344,7 @@ def try_tap_pad(
         if routing_obs is None:
             routing_obs = build_routing_obstacle_map(
                 local, config, net_id, pad_layer, skip_pad_blocking=False, verbose=False)
+            block_window_flanks(routing_obs, _row_pads, config)
         # Capture the search frontier on failure so a caller doing rip-up can
         # identify which net is blocking the via->pad trace (route_disconnected_
         # planes --rip-blocker-nets).
@@ -1378,8 +1401,79 @@ def tap_pad_with_escalation(
     corridor_ghosts=None,
     ghost_exclude_ids=(),
     plane_tap: bool = False,
+    pad_entry: bool = True,
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
+
+    The whole ladder first lands its trace through the ends of the net's
+    fine-pitch row pads (try_tap_pad's ``pad_entry``). Only when every rung
+    fails that way, and such a pad is in reach, is the ladder run again
+    without the flanks -- a pad entered from its side is still a connected
+    pad -- and the console says so; not for a tap that routes no trace.
+    ``pad_entry`` False runs the ladder once, flanks open: the #189 via-in-pad
+    rescue, which like every rescue of the route step runs without them.
+    See `_tap_ladder` for the rungs.
+    """
+    kwargs = dict(pending_pads=pending_pads, extra_vias=extra_vias,
+                  extra_segments=extra_segments, verbose=verbose,
+                  try_default=try_default, fine_for_all=fine_for_all,
+                  distant_trace_radius=distant_trace_radius,
+                  disable_reuse=disable_reuse, shared_via_maps=shared_via_maps,
+                  pour_trace_only=pour_trace_only, plane_oracle=plane_oracle,
+                  corridor_ghosts=corridor_ghosts,
+                  ghost_exclude_ids=ghost_exclude_ids, plane_tap=plane_tap)
+    result = _tap_ladder(pad, pad_layer, net_id, pcb_data, config,
+                         max_search_radius, via_size, via_drill,
+                         same_net_pad_clearance, pad_entry=pad_entry, **kwargs)
+    # A tap that routes no trace (a via in the pad, no reuse, no distant
+    # trace: the via-in-pad rescues) is the same with or without the flanks.
+    traces = (max_search_radius > 0 or distant_trace_radius > 0
+              or not disable_reuse or pour_trace_only)
+    if result.success or not pad_layer or not traces or not pad_entry:
+        return result
+    from pad_entry import window_row_pads
+    reach = max(max_search_radius, distant_trace_radius) + _WINDOW_MARGIN + _ITEM_MARGIN
+    if not window_row_pads(pcb_data, net_id, pad_layer, pad.global_x,
+                           pad.global_y, reach):
+        return result
+    side = _tap_ladder(pad, pad_layer, net_id, pcb_data, config,
+                       max_search_radius, via_size, via_drill,
+                       same_net_pad_clearance, pad_entry=False, **kwargs)
+    if side.success:
+        print(f"    Pad {pad.component_ref}.{pad.pad_number}: no tap through a "
+              f"pad end, tapped from a pad's side")
+    # Failed both ways: the unconstrained ladder's diagnostics name the
+    # blockers a rip-up caller can act on, as they did before.
+    return side
+
+
+def _tap_ladder(
+    pad: Pad,
+    pad_layer: Optional[str],
+    net_id: int,
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    max_search_radius: float,
+    via_size: float,
+    via_drill: float,
+    same_net_pad_clearance: float = -1.0,
+    pending_pads: Optional[List[Dict]] = None,
+    extra_vias: Optional[List[Dict]] = None,
+    extra_segments: Optional[List[Dict]] = None,
+    verbose: bool = False,
+    try_default: bool = True,
+    fine_for_all: bool = False,
+    distant_trace_radius: float = 0.0,
+    disable_reuse: bool = False,
+    shared_via_maps: Optional[SharedViaMaps] = None,
+    pour_trace_only: bool = False,
+    plane_oracle=None,
+    corridor_ghosts=None,
+    ghost_exclude_ids=(),
+    plane_tap: bool = False,
+    pad_entry: bool = True,
+) -> TapResult:
+    """tap_pad_with_escalation's ladder, every rung at one ``pad_entry``.
 
     Escalation (issue #104): try the caller's parameters first (skippable via
     try_default=False when they are already known to fail); if that fails and
@@ -1400,7 +1494,8 @@ def tap_pad_with_escalation(
             distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
             shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
             plane_oracle=plane_oracle, corridor_ghosts=corridor_ghosts,
-            ghost_exclude_ids=ghost_exclude_ids, plane_tap=plane_tap)
+            ghost_exclude_ids=ghost_exclude_ids, plane_tap=plane_tap,
+            pad_entry=pad_entry)
         if result.success:
             result.params_label = 'default'
             result.clearance_used = config.clearance
@@ -1460,7 +1555,8 @@ def tap_pad_with_escalation(
                 distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
                 shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
                 plane_oracle=plane_oracle, corridor_ghosts=corridor_ghosts,
-                ghost_exclude_ids=ghost_exclude_ids, plane_tap=plane_tap)
+                ghost_exclude_ids=ghost_exclude_ids, plane_tap=plane_tap,
+                pad_entry=pad_entry)
             if result.success:
                 result.params_label = 'fine'
                 result.clearance_used = fine_config.clearance
