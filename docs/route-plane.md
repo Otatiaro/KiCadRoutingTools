@@ -401,6 +401,12 @@ For each via those consumers place, the algorithm:
    - Can be routed to the pad using A* pathfinding
 4. **Fallback to farther via** - If no new via position works, try reusing any existing via farther out
 
+A pad tap (`plane_pad_tap.try_tap_pad`) blocks, in its trace map, the flanks of the net's fine-pitch row pads in
+its window (`pad_entry.py`, the same flanks the route step blocks): its trace reaches the tapped pad -- or a
+neighbouring same-net pad it reuses -- through an end, along the pad's axis, never down or across the gap
+between two pins of the package. A new via is not placed on such a flank either (in the pad, or on its axis
+past an end, it still may).
+
 #### Same-net pad clearance / via-in-pad
 
 By default the CLI keeps the legacy "via-in-pad" behavior — `--same-net-pad-clearance -1` means same-net pads are not added as via-placement obstacles, so a via may sit on a same-net pad (a repair tap then lands on the pad center whenever possible, with no trace). Set `--same-net-pad-clearance` to a non-negative value to force vias outside same-net pads with that edge-to-edge clearance. For example, `--same-net-pad-clearance 0.25` keeps the same edge-to-edge gap as the global `--clearance`.

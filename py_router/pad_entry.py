@@ -19,7 +19,9 @@ column alone stays open over the pad as well: the cleanup drops the copper
 inside a pad, so a jog the path took inside it onto the axis would be left
 as the visible exit. The octolinear smoother refuses a shortcut across a
 flank (`segment_crosses_flank`), which would otherwise cut the corner the
-route was made to turn past the end.
+route was made to turn past the end. A plane pad tap blocks the same flanks
+in its window's trace map (`block_window_flanks`) and keeps its new via off
+them (`via_site_on_flank`).
 
 A pad is a row pad when it is an SMD rectangle elongated along one axis
 (length >= 1.5 x width) with another pad of its footprint BESIDE it --
@@ -173,6 +175,41 @@ def net_flank_cells(pcb_data, net_id: int, config) -> np.ndarray:
     if not chunks:
         return np.empty((0, 3), dtype=np.int32)
     return np.unique(np.concatenate(chunks), axis=0)
+
+
+def window_row_pads(pcb_data, net_id: int, layer: str, cx: float, cy: float,
+                    half: float) -> List:
+    """The net's row pads on `layer` whose centre lies in the square window of
+    half-size `half` around (cx, cy)."""
+    return [p for p in row_pads(pcb_data, net_id) if layer in p.layers
+            and abs(p.global_x - cx) <= half and abs(p.global_y - cy) <= half]
+
+
+def block_window_flanks(obstacles, pads, config, layer_index: int = 0) -> None:
+    """Block the flanks of `pads` on `layer_index` of a throw-away map (a plane
+    tap's local window map: built per tap, so nothing is removed)."""
+    chunks = [c for c in (flank_cells(p, [layer_index], config) for p in pads) if len(c)]
+    if chunks:
+        obstacles.add_blocked_cells_batch(np.unique(np.concatenate(chunks), axis=0))
+
+
+def via_site_on_flank(pads, x: float, y: float, via_size: float, config) -> bool:
+    """True when a via at (x, y) would put its copper over a flank of one of
+    `pads` without sitting inside that pad: its trace would leave the pad
+    from the side. A via on the axis column past the end stays legal."""
+    r = via_size / 2
+    for p in pads:
+        hw, hl, along_x = _axis(p)
+        dx, dy = x - p.global_x, y - p.global_y
+        along, lat = (abs(dx), abs(dy)) if along_x else (abs(dy), abs(dx))
+        if along <= hl and lat <= hw:
+            continue              # a via in the pad needs no trace
+        if lat <= config.grid_step / 2 + 1e-6:
+            continue              # on the axis column
+        x0, y0, x1, y1 = flank_rects(p, config)[0 if (dy if along_x else dx) > 0 else 1]
+        if x0 - r < x < x1 + r and y0 - r < y < y1 + r:
+            return True
+    return False
 
 
 @contextlib.contextmanager
