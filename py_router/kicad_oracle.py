@@ -2873,6 +2873,15 @@ def oracle_reconnect(board_file: str, net_names, config,
                 _pw_cfg = config
             result = None
             used_via_size, used_via_drill = config.via_size, config.via_drill
+            # pad_entry: a link anchored on a fine-pitch row pad starts from
+            # the pad's centre on a map with the net's row-pad flanks
+            # blocked, so it lands through the pad's end -- KiCad's nearest
+            # approach between two neighbouring pins is straight across the
+            # gap between them. Failing that, the link routes as before.
+            from pad_entry import seeds_to_pad_centres, walled_copy
+            _end_src, _src_rows = seeds_to_pad_centres(pcb_data, net_id, src, config)
+            _end_tgt, _tgt_rows = seeds_to_pad_centres(pcb_data, net_id, tgt, config)
+            _ends = bool(_src_rows or _tgt_rows)
             # Via-size ladder: a 0.5 via has nowhere to drop in a QFN pocket
             # (lumenpnp U5); the descent rung is the escalation policy's
             # (#1170), as at the fine-pitch tap escalation.
@@ -2889,16 +2898,38 @@ def oracle_reconnect(board_file: str, net_names, config,
                         track_width=rung_cfg.track_width,
                         track_via_clearance=track_via_clearance,
                         hole_to_hole_clearance=hole_to_hole_clearance)
-                result, _iters = route_plane_connection_wide(
-                    src, tgt,
-                    plane_layer_idx=anchor_layer,
-                    routing_layers=routing_layers,
-                    base_obstacles=rung_obstacles,
-                    config=rung_cfg,
-                    net_vias=net_vias,
-                    track_margin=0,
-                    max_iterations=max_iterations,
-                    verbose=verbose)
+                result = None
+                _walled = (walled_copy(rung_obstacles, pcb_data, net_id,
+                                       routing_layers, rung_cfg,
+                                       _end_src + _end_tgt) if _ends else None)
+                if _walled is not None:
+                    result, _iters = route_plane_connection_wide(
+                        _end_src, _end_tgt,
+                        plane_layer_idx=anchor_layer,
+                        routing_layers=routing_layers,
+                        base_obstacles=_walled,
+                        config=rung_cfg,
+                        net_vias=net_vias,
+                        track_margin=0,
+                        max_iterations=max_iterations,
+                        verbose=verbose)
+                    if result:
+                        # The width upgrade below keeps to the same ends.
+                        src, tgt, rung_obstacles = _end_src, _end_tgt, _walled
+                if not result:
+                    result, _iters = route_plane_connection_wide(
+                        src, tgt,
+                        plane_layer_idx=anchor_layer,
+                        routing_layers=routing_layers,
+                        base_obstacles=rung_obstacles,
+                        config=rung_cfg,
+                        net_vias=net_vias,
+                        track_margin=0,
+                        max_iterations=max_iterations,
+                        verbose=verbose)
+                    if result and _walled is not None:
+                        print(f"    {net_name}: no link through a row pad's "
+                              f"ends, linked from a pad's side")
                 if result:
                     used_via_size, used_via_drill = vs, vd
                     break
