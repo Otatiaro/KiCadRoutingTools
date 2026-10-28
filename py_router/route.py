@@ -1663,6 +1663,134 @@ def _late_dangling_via_sweep1166(pcb_data, output_file, return_results,
         return 0, 0
 
 
+def _late_tht_via_drop(pcb_data, output_file, return_results, results_data,
+                       write_model, input_signature, scope_names,
+                       keep_input_copper, config):
+    """Remove the vias that change layer beside a through-hole pad of their
+    own net, laying the pad-side stub on the via's other layer, on the board
+    this run SHIPS (pcb_modification.drop_vias_beside_own_tht). Input copper
+    included: the shape outlives its reason when a later step moves the
+    foreign copper the via crossed.
+
+    Same plumbing as _late_dangling_via_sweep1166: the written file on the
+    CLI, the write model on the GUI (pcb_data itself on the "nothing to
+    route" return, where write_model is None). Input copper is told from the
+    run's by VALUE (input_signature), and --keep-input-copper makes it
+    read-only. Protected and impedance nets are skipped, as the smoother
+    skips them. Returns the number of vias removed.
+    """
+    import copy as _copy
+    from collections import Counter
+    from improvement_gate import copper_item_key
+    from pcb_modification import drop_vias_beside_own_tht
+    from cleanup_pipeline import _smooth_skip_net_ids
+    try:
+        rd = None
+        if return_results:
+            rd = results_data if results_data is not None else {}
+            board = _copy.copy(pcb_data)
+            if write_model is not None:
+                segs_by_net, vias_by_net = write_model(rd)
+                board.segments = [x for _l in segs_by_net.values() for x in _l]
+                board.vias = [x for _l in vias_by_net.values() for x in _l]
+            else:
+                board.segments = list(pcb_data.segments)
+                board.vias = list(pcb_data.vias)
+        elif output_file and os.path.isfile(output_file):
+            from kicad_parser import parse_kicad_pcb as _pk_tv
+            board = _pk_tv(output_file)
+        else:
+            return 0
+        name_of = {nid: n.name for nid, n in board.nets.items()}
+        left = {n: Counter(c) for n, c in (input_signature or {}).items()}
+        owned, protected = set(), set()
+        for item in list(board.segments) + list(board.vias):
+            c = left.get(name_of.get(item.net_id))
+            k = copper_item_key(item)
+            if c and c[k] > 0:
+                c[k] -= 1                   # input copper
+                if keep_input_copper:
+                    protected.add(id(item))
+            else:
+                owned.add(id(item))
+        scope = {nid for nid, nm in name_of.items() if nm in set(scope_names)}
+        if not scope:
+            return 0
+        # The run's maps are keyed by ITS net ids; the board read back from
+        # the file numbers its own, so carry them across by name.
+        id_of = {n.name: nid for nid, n in board.nets.items()}
+        run_name = {nid: n.name for nid, n in pcb_data.nets.items()}
+        skip = {id_of[run_name[n]] for n in _smooth_skip_net_ids(pcb_data)
+                if run_name.get(n) in id_of}
+        _nc = getattr(config, 'net_clearances', None) or None
+        if _nc:
+            _nc = {id_of[run_name[n]]: c for n, c in _nc.items()
+                   if run_name.get(n) in id_of}
+        _stats = {}
+        removed, dropped, added = drop_vias_beside_own_tht(
+            board, scope, config=config, clearance=config.clearance,
+            net_clearances=_nc,
+            board_edge_clearance=getattr(config, 'board_edge_clearance', 0.0) or 0.0,
+            protected_ids=protected, skip_net_ids=skip, stats=_stats)
+        if not dropped:
+            if _stats.get('blocked'):
+                print(f"  Vias beside own through-hole pads (end of run): "
+                      f"{_stats['blocked']} kept, the other layer is taken "
+                      f"beside the pad")
+            return 0
+        gone = {id(x) for x in removed + dropped}
+        if return_results:
+            for r in rd.get('results') or []:
+                for key in ('new_segments', 'new_vias'):
+                    if r.get(key):
+                        r[key] = [x for x in r[key] if id(x) not in gone]
+            for key in ('all_swap_segments', 'all_swap_vias'):
+                if rd.get(key):
+                    rd[key] = [x for x in rd[key] if id(x) not in gone]
+            rd.setdefault('segments_to_remove', []).extend(
+                x for x in removed if id(x) not in owned)
+            rd.setdefault('vias_to_remove', []).extend(
+                x for x in dropped if id(x) not in owned)
+            rd.setdefault('results', []).append({
+                'new_segments': list(added), 'new_vias': [],
+                'cleanup': 'tht_via_drop'})
+            pcb_data.segments = [x for x in pcb_data.segments
+                                 if id(x) not in gone] + list(added)
+            pcb_data.vias = [x for x in pcb_data.vias if id(x) not in gone]
+            bump_copper_epoch(pcb_data)
+            n_v = len(dropped)
+        else:
+            n_s, n_v = _strip_written_copper(output_file, removed, dropped,
+                                             name_of, match_width=True)
+            if (n_s, n_v) != (len(removed), len(dropped)):
+                print(f"  WARNING: through-hole via drop: chose "
+                      f"{len(removed)} segment(s) and {len(dropped)} via(s), "
+                      f"found {n_s} and {n_v} in the written file")
+            from kicad_parser import board_uses_name_nets
+            from kicad_writer import generate_segment_sexpr
+            with open(output_file, 'r', encoding='utf-8') as _f:
+                _content = _f.read()
+            _v10 = board_uses_name_nets(_content)
+            _sx = [generate_segment_sexpr(
+                (w.start_x, w.start_y), (w.end_x, w.end_y), w.width, w.layer,
+                w.net_id, name_of.get(w.net_id) if _v10 else None)
+                for w in added]
+            _lp = _content.rfind(')')
+            _content = _content[:_lp] + '\n'.join(_sx) + '\n' + _content[_lp:]
+            with open(output_file, 'w', encoding='utf-8') as _f:
+                _f.write(_content)
+        print(f"  Vias beside own through-hole pads (end of run): removed "
+              f"{n_v} via(s) on {_stats.get('nets', 0)} net(s), the pad-side "
+              f"stub laid on the via's other layer"
+              + (f"; {_stats['blocked']} kept, the other layer is taken "
+                 f"beside the pad" if _stats.get('blocked') else ""))
+        return n_v
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  (end-of-run through-hole via drop skipped: "
+              f"{type(_e).__name__}: {_e})")
+        return 0
+
+
 def _late_stacked_dedup162(pcb_data, output_file, return_results, results_data,
                            write_model, input_signature, scope_names,
                            keep_input_copper):
@@ -3492,6 +3620,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _late_dangling_via_sweep1166(
                     pcb_data, output_file, True, _rd659, None, _input_sig1069,
                     _scope1166, keep_input_copper)
+                _late_tht_via_drop(
+                    pcb_data, output_file, True, _rd659, None, _input_sig1069,
+                    _scope1166, keep_input_copper, config)
             _late_orphan_sweep659(pcb_data, output_file, True, _rd659,
                                   None, keep_input_copper, skip_routing)
             return 0, 0, 0.0, _rd659
@@ -3500,6 +3631,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _late_dangling_via_sweep1166(
                 pcb_data, output_file, False, None, None, _input_sig1069,
                 _scope1166, keep_input_copper)
+            _late_tht_via_drop(
+                pcb_data, output_file, False, None, None, _input_sig1069,
+                _scope1166, keep_input_copper, config)
         _late_orphan_sweep659(pcb_data, output_file, False, None,
                               None, keep_input_copper, skip_routing)
         return 0, 0, 0.0
@@ -8652,6 +8786,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             {pcb_data.nets[_n].name for _n in sweep_scope_ids
              if _n in pcb_data.nets},
             keep_input_copper)
+        # A via beside a through-hole pad of its own net, once the pad can
+        # carry the stub on the via's other layer; after every pass that
+        # lays copper, so the stub is judged against the board that ships.
+        _late_tht_via_drop(
+            pcb_data, output_file, return_results, locals().get('results_data'),
+            _gui_write_model, _input_sig1069,
+            {pcb_data.nets[_n].name for _n in sweep_scope_ids
+             if _n in pcb_data.nets},
+            keep_input_copper, config)
         # #162: exact same-net duplicates, which none of the above removes
         # on a zoned net and the finalize's pad repair lays.
         _late_stacked_dedup162(
