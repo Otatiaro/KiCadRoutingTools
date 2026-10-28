@@ -1469,13 +1469,47 @@ def _identify_blocking_obstacles(
 # them live as before.
 _DEFERRED_DIAG: Optional[List[str]] = None
 
+# A search on a map with the net's row-pad flanks (pad_entry) is tried before
+# the same search without them (_route_with_via_unblock). Its diagnostics are
+# HELD -- lines and blocked-start dumps alike, the dumps not computed -- until
+# its result is known to stand; a failure the ladder repeats without the
+# flanks drops them, and the repeat reports on the map that matters. A
+# blocked-start dump names the blocking nets, which costs a scan of the
+# board's copper: on a 4-layer board with 500 such failures, 18 s.
+_HELD_DIAG: Optional[list] = None
+
 
 def _diag(msg: str) -> None:
     """Emit a search diagnostic: live, or into the active per-net capture."""
-    if _DEFERRED_DIAG is None:
+    if _HELD_DIAG is not None:
+        _HELD_DIAG.append((None, msg))
+    elif _DEFERRED_DIAG is None:
         print(msg)
     else:
         _DEFERRED_DIAG.append(msg)
+
+
+@contextmanager
+def _held_diagnostics():
+    """Hold the diagnostics emitted in the block (see _HELD_DIAG); yields
+    the list `_replay_diagnostics` emits."""
+    global _HELD_DIAG
+    outer, held = _HELD_DIAG, []
+    _HELD_DIAG = held
+    try:
+        yield held
+    finally:
+        _HELD_DIAG = outer
+
+
+def _replay_diagnostics(held) -> None:
+    """Emit diagnostics held by `_held_diagnostics`, in order, on the map
+    they were held on (unchanged since)."""
+    for args, payload in held:
+        if args is None:
+            _diag(payload)
+        else:
+            _diagnose_blocked_start(*args, **payload)
 
 
 @contextmanager
@@ -1531,6 +1565,11 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
     Checks blocking status of start cells and their immediate neighbors.
     If pcb_data and config are provided, also identifies which nets are blocking.
     """
+    if _HELD_DIAG is not None:
+        _HELD_DIAG.append(((obstacles, cells, label, print_prefix, track_margin),
+                           dict(pcb_data=pcb_data, config=config,
+                                current_net_id=current_net_id)))
+        return
     if not cells:
         _diag(f"{print_prefix}  {label}: no cells to check")
         return
@@ -3510,17 +3549,21 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     a plain search, then the rescues -- so a pad with no free end still
     connects, from its side, as before the flanks existed, and the console
     says so. The rescues never run with the flanks up: they cost far more
-    than the one walled search."""
+    than the one walled search. The walled search's diagnostics are held
+    and emitted only when its result stands (_HELD_DIAG)."""
     from pad_entry import active, lifted
     if active(obstacles, net_id) is None:
         return _route_with_via_unblock_impl(
             router, obstacles, config, sources, targets, track_margin, pcb_data,
             net_id, print_prefix, direction_labels, single_direction, waypoints,
             pending_vias, pad_sources)
-    first = _route_main_connection(router, obstacles, config, sources, targets, track_margin,
-                                   pcb_data, net_id, print_prefix, direction_labels,
-                                   single_direction, waypoints, pad_sources=pad_sources)
+    with _held_diagnostics() as held:
+        first = _route_main_connection(router, obstacles, config, sources, targets,
+                                       track_margin, pcb_data, net_id, print_prefix,
+                                       direction_labels, single_direction, waypoints,
+                                       pad_sources=pad_sources)
     if first[0] is not None:
+        _replay_diagnostics(held)
         return first + ([], [])
     # A search that never ran into a flank cell is the search the map without
     # them gives (same cells, same costs): the ladder starts from its result
@@ -3531,6 +3574,8 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     margins = track_margin if isinstance(track_margin, (list, tuple)) else [track_margin]
     reuse = (not touched(obstacles, net_id, first[2], first[3])
              and not any(m for m in margins if m))
+    if reuse:
+        _replay_diagnostics(held)
     with lifted(obstacles, net_id):
         res = _route_with_via_unblock_impl(
             router, obstacles, config, sources, targets, track_margin, pcb_data,
