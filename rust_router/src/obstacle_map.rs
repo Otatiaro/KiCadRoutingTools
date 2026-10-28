@@ -268,6 +268,33 @@ pub struct GridObstacleMap {
     pub free_via_positions: FxHashSet<u64>,
 }
 
+/// The linear stub-proximity falloff of one disk, row by row: (dy, first dx,
+/// cost of each dx from there). Computed once per call instead of a square
+/// root per cell per stub; every cost is the same f32 expression as before,
+/// so the same integer to the bit.
+fn falloff_disk(radius: i32, max_cost: i32) -> Vec<(i32, i32, Vec<i32>)> {
+    let radius_sq = radius * radius;
+    let radius_f = radius as f32;
+    let mut rows = Vec::new();
+    for dy in -radius..=radius {
+        let mut dx0 = None;
+        let mut costs = Vec::new();
+        for dx in -radius..=radius {
+            let dist_sq = dx * dx + dy * dy;
+            if dist_sq <= radius_sq {
+                let dist = (dist_sq as f32).sqrt();
+                let proximity = 1.0 - (dist / radius_f);
+                dx0.get_or_insert(dx);
+                costs.push((proximity * max_cost as f32) as i32);
+            }
+        }
+        if let Some(dx0) = dx0 {
+            rows.push((dy, dx0, costs));
+        }
+    }
+    rows
+}
+
 // The map is shared across threads by reference (tiles are Arc, nothing is
 // Cell/RefCell): reads need no lock. Keep it so.
 const _: fn() = || {
@@ -917,21 +944,10 @@ impl GridObstacleMap {
         radius: i32,
         max_cost: i32,
     ) {
-        let radius_sq = radius * radius;
-        let radius_f = radius as f32;
-
+        let disk = falloff_disk(radius, max_cost);
         for (gcx, gcy) in stubs {
-            for dx in -radius..=radius {
-                for dy in -radius..=radius {
-                    let dist_sq = dx * dx + dy * dy;
-                    if dist_sq <= radius_sq {
-                        let dist = (dist_sq as f32).sqrt();
-                        let proximity = 1.0 - (dist / radius_f);
-                        let cost = (proximity * max_cost as f32) as i32;
-
-                        self.stub_proximity.raise(gcx + dx, gcy + dy, 0, cost);
-                    }
-                }
+            for (dy, dx0, costs) in &disk {
+                self.stub_proximity.raise_row(gcx + dx0, gcy + dy, 0, costs);
             }
         }
     }
@@ -961,38 +977,26 @@ impl GridObstacleMap {
             if radius <= 0 || points.is_empty() {
                 continue;
             }
-            let radius_sq = radius * radius;
-            let radius_f = radius as f32;
-            let mut field: FxHashMap<u64, i32> = FxHashMap::default();
+            // the group's field: the max over its point disks
+            let disk = falloff_disk(radius, max_cost);
+            let mut field = CostGrid::new(1);
             for (gcx, gcy) in points {
-                for dx in -radius..=radius {
-                    for dy in -radius..=radius {
-                        let dist_sq = dx * dx + dy * dy;
-                        if dist_sq <= radius_sq {
-                            let dist = (dist_sq as f32).sqrt();
-                            let proximity = 1.0 - (dist / radius_f);
-                            let cost = (proximity * max_cost as f32) as i32;
-                            if cost > 0 {
-                                let entry = field.entry(pack_xy(gcx + dx, gcy + dy)).or_insert(0);
-                                if cost > *entry {
-                                    *entry = cost;
-                                }
-                            }
-                        }
-                    }
+                for (dy, dx0, costs) in &disk {
+                    field.raise_row(gcx + dx0, gcy + dy, 0, costs);
                 }
             }
-            for (key, cost) in field {
-                let (gx, gy) = unpack_xy(key);
+            // max and sum both commute: the visiting order is irrelevant
+            let sp = &mut self.stub_proximity;
+            field.for_each(0, |gx, gy, cost| {
                 let in_max_zone = !rects.is_empty() &&
                     rects.iter().any(|&(x0, y0, x1, y1)|
                         gx >= x0 && gx <= x1 && gy >= y0 && gy <= y1);
                 if in_max_zone {
-                    self.stub_proximity.raise(gx, gy, 0, cost);
+                    sp.raise(gx, gy, 0, cost);
                 } else {
-                    self.stub_proximity.add(gx, gy, 0, cost);
+                    sp.add(gx, gy, 0, cost);
                 }
-            }
+            });
         }
     }
 
