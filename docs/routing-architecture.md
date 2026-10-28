@@ -589,11 +589,13 @@ in memory is always the board that will be written:
 6. **Neck wide segments** that graze a fine-pitch foreign pad
 7. **Smooth** staircase micro-jogs into octolinear shortcuts (#536; the route step only)
 8. **Close soft joints** - the last pass that adds copper: bridge any same-net joint that only touches
-9. **Merge collinear segments** - join same-net, same-layer, same-width pieces into one track (#811)
+9. **Cut acute corners** - land one arm of each same-net corner under 90 degrees on the other through a perpendicular cut (`acute_corners.py`, #1233); the one pass after close that adds copper, and every cut ends on a kept joint, so it makes no soft joint
+10. **Merge collinear segments** - join same-net, same-layer, same-width pieces into one track (#811)
 
 `route.py` runs the strict collapse once more at the very end, on the board it
 ships, after the plane finalize and the reconciliation have laid their copper
-(#1063). `KICAD_BOARD_LEDGER=1` checks, per net, that the copper in memory and
+(#1063), and cuts the acute corners that copper made (#1233; `KICAD_ACUTE_CHAMFER=0`
+turns both corner passes off for an A/B). `KICAD_BOARD_LEDGER=1` checks, per net, that the copper in memory and
 the copper the writer produces are identical.
 
 ## Visualizing the Search
