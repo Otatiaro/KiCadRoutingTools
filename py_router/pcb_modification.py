@@ -6112,7 +6112,6 @@ def _collapse_collinear_vertices(vpts, max_deviation: float, pad_cover=None):
 def merge_collinear_segments(results, pcb_data: PCBData, scope_net_ids=None,
                              keep_input_copper: bool = False,
                              max_deviation: float = 1e-6,
-                             max_net_segs: int = 4000,
                              max_chain_segs: int = 1000,
                              dry_run: bool = False):
     """Join collinear same-net/same-layer/same-width track pieces (#811).
@@ -6168,6 +6167,12 @@ def merge_collinear_segments(results, pcb_data: PCBData, scope_net_ids=None,
     Overlapping (rather than merely touching) same-net copper is a different
     defect with a different fix -- see issue #606; this pass does not address it.
 
+    Every net is processed, however large: the ground net is where plane taps
+    pile up thousands of grid-step pieces, so a per-net size cap skipped
+    exactly the net that needed the pass most. The cost stays linear in the
+    board's copper -- pads are found through a per-group spatial index, and
+    ``pcb_data.segments`` is spliced once per net rather than once per chain.
+
     Returns (merged_count, nets_changed, original_segments_to_remove,
     added_segments, stats)."""
     from collections import defaultdict
@@ -6194,15 +6199,12 @@ def merge_collinear_segments(results, pcb_data: PCBData, scope_net_ids=None,
     original_to_remove = []
     added_segments = []
     nets_changed = 0
-    stats = {'nets': 0, 'nets_skipped_large': 0, 'chains': 0, 'joints': 0,
+    stats = {'nets': 0, 'chains': 0, 'joints': 0,
              'segs_removed': 0, 'segs_added': 0}
 
     for net_id in sorted(segs_by_net.keys()):
         net_segs = segs_by_net[net_id]
         if len(net_segs) < 2:
-            continue
-        if len(net_segs) > max_net_segs:
-            stats['nets_skipped_large'] += 1
             continue
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_vias = vias_by_net.get(net_id, [])
@@ -6230,6 +6232,8 @@ def merge_collinear_segments(results, pcb_data: PCBData, scope_net_ids=None,
             groups[(s.layer, round(s.width, 4))].append(s)
 
         net_changed = False
+        net_rm = set()
+        net_added = []
         for (layer, w), gsegs in sorted(groups.items()):
             if len(gsegs) < 2:
                 continue
@@ -6238,18 +6242,27 @@ def merge_collinear_segments(results, pcb_data: PCBData, scope_net_ids=None,
                 gadj[vk(s.start_x, s.start_y)].append(s)
                 gadj[vk(s.end_x, s.end_y)].append(s)
 
+            # The group's pads bucketed on a 1 mm grid by their reach, built
+            # on the first pad_cover call: most groups never merge anything.
+            pad_grid = None
+
             def pad_cover(x, y, _layer=layer, _w=w):
                 """Ids of the same-net pads whose copper covers this point --
                 the vertex's pad CUSTODY, which the collapse must not orphan.
                 Same geometry smooth_octolinear_chains anchors on; here it is
                 carried per vertex instead of vetoing the vertex outright."""
+                nonlocal pad_grid
+                if pad_grid is None:
+                    pad_grid = defaultdict(list)
+                    for pad in net_pads:
+                        if not (_layer in pad.layers or any('*' in L for L in pad.layers)):
+                            continue
+                        r = math.hypot(pad.size_x, pad.size_y) / 2.0 + _w / 2.0 + COINCIDENCE_TOL
+                        for cx in range(math.floor(pad.global_x - r), math.floor(pad.global_x + r) + 1):
+                            for cy in range(math.floor(pad.global_y - r), math.floor(pad.global_y + r) + 1):
+                                pad_grid[(cx, cy)].append(pad)
                 out = set()
-                for pad in net_pads:
-                    if not (_layer in pad.layers or any('*' in L for L in pad.layers)):
-                        continue
-                    r = math.hypot(pad.size_x, pad.size_y) / 2.0 + _w / 2.0 + COINCIDENCE_TOL
-                    if abs(x - pad.global_x) > r or abs(y - pad.global_y) > r:
-                        continue
+                for pad in pad_grid.get((math.floor(x), math.floor(y)), ()):
                     if point_to_pad_distance(x, y, pad) <= _w / 2.0 + COINCIDENCE_TOL:
                         out.add(id(pad))
                 return frozenset(out)
@@ -6329,14 +6342,16 @@ def merge_collinear_segments(results, pcb_data: PCBData, scope_net_ids=None,
                         results.append(res)
                     res['new_segments'] = list(res.get('new_segments') or []) + new_chain_segs
                     added_segments.extend(new_chain_segs)
-                    # Splice pcb_data NOW, per chain (#508 finding 5), so the
-                    # board and the write-list never disagree mid-pass.
-                    _rm = {id(s) for s in chain}
-                    pcb_data.segments = [s for s in pcb_data.segments
-                                         if id(s) not in _rm] + new_chain_segs
+                    net_rm.update(id(s) for s in chain)
+                    net_added.extend(new_chain_segs)
                     net_changed = True
         if net_changed:
             nets_changed += 1
+            # Splice pcb_data per net (#508 finding 5), so the board and the
+            # write-list never disagree past the net being merged; nothing
+            # inside a net's loop reads pcb_data.segments.
+            pcb_data.segments = [s for s in pcb_data.segments
+                                 if id(s) not in net_rm] + net_added
 
     if removed_ids:
         for r in results:

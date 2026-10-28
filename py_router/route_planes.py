@@ -503,51 +503,40 @@ def _path_to_segments(path, via_pos, pad, pad_layer, net_id, config, coord):
     stubs from the exact via float position to the first grid point and from the
     last grid point to the pad centre. `path` must run from the via/source end to
     the pad end.
+
+    The A* path holds one point per grid cell, so a straight 1 mm tap is 20
+    points at a 0.05 mm grid. Collinear points are collapsed with the #811
+    merge's own predicate (`_geometric_collapse` at 1 nm) before any copper is
+    emitted: the trace is the same union of capsules, in as few segments as
+    its corners need. Emitting one segment per cell left the collapse to the
+    end-of-run cleanup, whose merge and smoothing both skip a net above their
+    size caps -- a board's GND, which is exactly the net that carries the taps.
     """
-    segments = []
+    from pcb_modification import _geometric_collapse
 
-    # Add connecting segment from via to first path point
+    pts = []
     if path:
-        first_gx, first_gy, _ = path[0]
-        first_x, first_y = coord.to_float(first_gx, first_gy)
+        first_x, first_y = coord.to_float(path[0][0], path[0][1])
         if abs(via_pos[0] - first_x) > 0.001 or abs(via_pos[1] - first_y) > 0.001:
-            segments.append({
-                'start': via_pos,
-                'end': (first_x, first_y),
-                'width': config.track_width,
-                'layer': pad_layer,
-                'net_id': net_id
-            })
-
-    # Convert path points to segments
-    for i in range(len(path) - 1):
-        gx1, gy1, _ = path[i]
-        gx2, gy2, _ = path[i + 1]
-
-        x1, y1 = coord.to_float(gx1, gy1)
-        x2, y2 = coord.to_float(gx2, gy2)
-
-        if (x1, y1) != (x2, y2):
-            segments.append({
-                'start': (x1, y1),
-                'end': (x2, y2),
-                'width': config.track_width,
-                'layer': pad_layer,
-                'net_id': net_id
-            })
-
-    # Add connecting segment from last path point to pad center
+            pts.append(tuple(via_pos))
+    for gx, gy, _ in path:
+        p = coord.to_float(gx, gy)
+        if not pts or p != pts[-1]:
+            pts.append(p)
     if path:
-        last_gx, last_gy, _ = path[-1]
-        last_x, last_y = coord.to_float(last_gx, last_gy)
+        last_x, last_y = pts[-1]
         if abs(pad.global_x - last_x) > 0.001 or abs(pad.global_y - last_y) > 0.001:
-            segments.append({
-                'start': (last_x, last_y),
-                'end': (pad.global_x, pad.global_y),
-                'width': config.track_width,
-                'layer': pad_layer,
-                'net_id': net_id
-            })
+            pts.append((pad.global_x, pad.global_y))
+    if len(pts) > 2:
+        pts = [pts[i] for i in _geometric_collapse(pts, 1e-6)]
+
+    segments = [{
+        'start': pts[i],
+        'end': pts[i + 1],
+        'width': config.track_width,
+        'layer': pad_layer,
+        'net_id': net_id
+    } for i in range(len(pts) - 1)]
 
     return _bound_tap_neck(segments, net_id, pad_layer, config)
 
