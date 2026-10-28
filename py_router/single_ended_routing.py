@@ -2059,7 +2059,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     (`pad_entry.stamp`)."""
     from net_keepouts import stamp as _nk_stamp
     from pad_entry import stamp as _flank_stamp
-    with _nk_stamp(obstacles, pcb_data, (net_id,), config),             _flank_stamp(obstacles, pcb_data, net_id, config):
+    with _nk_stamp(obstacles, pcb_data, (net_id,), config), \
+            _flank_stamp(obstacles, pcb_data, net_id, config):
         return _route_net_with_obstacles_impl(pcb_data, net_id, config, obstacles,
                                               *args, **kwargs)
 
@@ -4483,7 +4484,8 @@ def route_multipoint_main(pcb_data: PCBData, net_id: int, config: GridRouteConfi
     so are the flanks of its row pads (`pad_entry.stamp`)."""
     from net_keepouts import stamp as _nk_stamp
     from pad_entry import stamp as _flank_stamp
-    with _nk_stamp(obstacles, pcb_data, (net_id,), config),             _flank_stamp(obstacles, pcb_data, net_id, config):
+    with _nk_stamp(obstacles, pcb_data, (net_id,), config), \
+            _flank_stamp(obstacles, pcb_data, net_id, config):
         return _route_multipoint_main_impl(pcb_data, net_id, config, obstacles,
                                            *args, **kwargs)
 
@@ -5337,7 +5339,8 @@ def route_multipoint_taps(
     from net_keepouts import stamp as _nk_stamp
     from pad_entry import stamp as _flank_stamp
     try:
-        with _nk_stamp(obstacles, pcb_data, (net_id,), config),                 _flank_stamp(obstacles, pcb_data, net_id, config):
+        with _nk_stamp(obstacles, pcb_data, (net_id,), config), \
+                _flank_stamp(obstacles, pcb_data, net_id, config):
             # The scoped copy is taken AFTER the lift and the keep-outs: the
             # #977 lift registry is keyed by map, so a copy taken first would
             # be lifted a second time.
