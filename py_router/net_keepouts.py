@@ -242,12 +242,39 @@ def attach(pcb_data, keepouts: Optional[List[dict]]) -> None:
     """Record the run's net-filtered keep-outs on `pcb_data`. None or [] CLEARS
     any a previous run attached: the GUI hands every run the same long-lived
     PCBData, so a run on a board whose rule was removed (or a tab whose run
-    reads no rule) must not keep stamping the previous run's regions."""
+    reads no rule) must not keep stamping the previous run's regions.
+
+    The list may also carry the `dru_copper_rules` entries (a dict with a
+    `kind`): they ride the same list from the rules to a nested sub-run, and
+    are recorded on `pcb_data._dru_copper_rules`, stamped by `stamp` too."""
+    keepouts = list(keepouts or [])
+    copper = [k for k in keepouts if k.get('kind')]
+    keepouts = [k for k in keepouts if not k.get('kind')]
+    for cache in ('_dru_copper_hole_cells', '_dru_copper_bound'):
+        pcb_data.__dict__.pop(cache, None)
+    if copper:
+        pcb_data._dru_copper_rules = copper
+    else:
+        pcb_data.__dict__.pop('_dru_copper_rules', None)
     if not keepouts:
         pcb_data.__dict__.pop('_net_keepouts', None)
         pcb_data.__dict__.pop('_net_keepout_cells', None)
         return
-    pcb_data._net_keepouts = list(keepouts)
+    pcb_data._net_keepouts = keepouts
+    pcb_data._net_keepout_cells = {}
+
+
+def attached(pcb_data) -> List[dict]:
+    """Everything `attach` recorded, in the list form it takes (a nested
+    sub-run is handed this)."""
+    return (list(getattr(pcb_data, '_net_keepouts', None) or [])
+            + list(getattr(pcb_data, '_dru_copper_rules', None) or []))
+
+
+def active(pcb_data) -> bool:
+    """Whether a route on `pcb_data` has anything for `stamp` to stamp."""
+    return bool(getattr(pcb_data, '_net_keepouts', None)
+                or getattr(pcb_data, '_dru_copper_rules', None))
     pcb_data._net_keepout_cells = {}
 
 
@@ -314,7 +341,21 @@ def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.n
 @contextlib.contextmanager
 def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
     """Block the keep-outs binding any of `net_ids` in `obstacles` for the
-    duration of the block, then remove exactly what was added.
+    duration of the block, then remove exactly what was added -- and, with
+    them, what the board's net-pair and pad hole-clearance rules require of
+    the route (`dru_copper_rules.stamp`).
+"""
+    from dru_copper_rules import stamp as _copper_stamp
+    net_ids = tuple(net_ids)
+    with _copper_stamp(obstacles, pcb_data, net_ids, config,
+                       extra=config.__dict__.get('_centerline_extra', 0.0)), \
+            _stamp_keepouts(obstacles, pcb_data, net_ids, config):
+        yield
+
+
+@contextlib.contextmanager
+def _stamp_keepouts(obstacles, pcb_data, net_ids: Iterable[int], config):
+    """`stamp`'s keep-out half.
 
     Via cells reach every via map the list twins (add/remove_vias_list) do:
     rung 0 at the run's via, the #568 small rung at the run's via (a superset
@@ -364,7 +405,10 @@ def centerline_config(config):
     (lvds_converter_dualclk /CLK+: its copper over the edge by 0.5 um)."""
     from dataclasses import replace
     extra = (config.track_width + config.diff_pair_gap) / 2
-    return replace(config, clearance=config.clearance + extra)
+    cfg = replace(config, clearance=config.clearance + extra)
+    # dru_copper_rules prices its own values, so it adds the offset itself.
+    cfg.__dict__['_centerline_extra'] = extra
+    return cfg
 
 
 def stamping(net_ids_of, maps_of, centerline: bool = False):
@@ -386,7 +430,7 @@ def stamping(net_ids_of, maps_of, centerline: bool = False):
         @functools.wraps(fn)
         def run(*args, **kwargs):
             pcb_data = args[0] if args else kwargs.get('pcb_data')
-            if not getattr(pcb_data, '_net_keepouts', None):
+            if not active(pcb_data):
                 return run.__wrapped__(*args, **kwargs)
             a = sig.bind(*args, **kwargs).arguments
             nets, seen = tuple(net_ids_of(a)), []

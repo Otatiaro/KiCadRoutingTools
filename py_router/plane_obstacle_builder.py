@@ -577,6 +577,13 @@ def build_via_obstacle_map(
     from sense_branch import stamp_plane_obstacles
     stamp_plane_obstacles(obstacles, pcb_data, config, exclude_net_id,
                           config.layers, tracks=False)
+    # The board's net-pair and pad hole-clearance rules for the tapped net
+    # (dru_copper_rules): its vias kept off the copper of every net a rule
+    # pairs it with, and off bound pads' holes and copper.
+    from dru_copper_rules import cells_for as _copper_cells
+    _cv = _copper_cells(pcb_data, (exclude_net_id,), config)[1]
+    if len(_cv):
+        obstacles.add_blocked_vias_batch(np.ascontiguousarray(_cv, dtype=np.int32))
 
     if verbose:
         print(f"  Total obstacle build: {time.time() - t_start:.2f}s")
