@@ -148,7 +148,9 @@ def t_the_movers_ask_about_slots_at_the_edge_floor():
                             'py_router', 'pcb_modification.py')).read()
     tree = ast.parse(src)
     lines = src.splitlines()
-    want = {'smooth_octolinear_chains', 'nudge_grazing_octolinear',
+    # smooth_octolinear_chains' edge floor lives in make_segment_clears, the
+    # predicate it builds its clears() from.
+    want = {'make_segment_clears', 'nudge_grazing_octolinear',
             'nudge_grazing_microshift'}
     seen = {}
     for fn in ast.walk(tree):
