@@ -374,6 +374,11 @@ def _segs_cross(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> bool:
     return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
 
 
+# Slack (mm) on the bbox-gap prefilter of _saved_route_colliders: it only
+# keeps more pairs for the exact test, so rounding never drops a collision.
+_GAP_SLACK = 1e-6
+
+
 def _seg_seg_dist_sq(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> float:
     """Minimum squared distance between two segments (0 if they cross)."""
     if _segs_cross(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1):
@@ -516,42 +521,77 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             seen.add(id(obj))
             hits.append((kind, obj))
 
+    # Every pair below is priced at most `reach` (the bbox margin's bound), so
+    # a foreign item whose bbox gap to the restored item is at least its own
+    # half size + the restored half size + `reach` cannot collide, whatever
+    # the pair's own clearance. The gaps are taken for all foreign items at
+    # once, and only the rest are measured, in the original order: the hits,
+    # their order and the first_only verdict are those of the full scan.
+    import numpy as np
+    reach = margin - own_half
+    if o_segs:
+        osx0 = np.array([min(o.start_x, o.end_x) for o in o_segs])
+        osx1 = np.array([max(o.start_x, o.end_x) for o in o_segs])
+        osy0 = np.array([min(o.start_y, o.end_y) for o in o_segs])
+        osy1 = np.array([max(o.start_y, o.end_y) for o in o_segs])
+        os_half = np.array([o.width / 2.0 for o in o_segs])
+        os_layer = [o.layer for o in o_segs]
+    if o_vias:
+        ovx = np.array([v.x for v in o_vias])
+        ovy = np.array([v.y for v in o_vias])
+        ov_half = np.array([v.size / 2.0 for v in o_vias])
+
+    def _near(x0, x1, y0, y1, ex0, ex1, ey0, ey1, e_half, own_h):
+        gx = np.maximum(np.maximum(ex0 - x1, x0 - ex1), 0.0)
+        gy = np.maximum(np.maximum(ey0 - y1, y0 - ey1), 0.0)
+        return np.flatnonzero(np.hypot(gx, gy) < e_half + own_h + reach + _GAP_SLACK)
+
     # Restored segments vs other-net segments (same layer) and vias (all layers).
     for s in segs:
         hw = s.width / 2.0
-        for o in o_segs:
-            if o.layer != s.layer:
-                continue
-            thr = hw + o.width / 2.0 + _clr(s.net_id, o, s.layer, 'track')
-            if _seg_seg_dist_sq(s.start_x, s.start_y, s.end_x, s.end_y,
-                                o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
-                _hit('segment', o)
-                if first_only:
-                    return hits
-        for v in o_vias:
-            thr = hw + v.size / 2.0 + _clr(s.net_id, v, s.layer, 'layer')
-            if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
-                               s.end_x, s.end_y) < thr * thr:
-                _hit('via', v)
-                if first_only:
-                    return hits
+        sx0, sx1 = min(s.start_x, s.end_x), max(s.start_x, s.end_x)
+        sy0, sy1 = min(s.start_y, s.end_y), max(s.start_y, s.end_y)
+        if o_segs:
+            for i in _near(sx0, sx1, sy0, sy1, osx0, osx1, osy0, osy1, os_half, hw):
+                if os_layer[i] != s.layer:
+                    continue
+                o = o_segs[i]
+                thr = hw + o.width / 2.0 + _clr(s.net_id, o, s.layer, 'track')
+                if _seg_seg_dist_sq(s.start_x, s.start_y, s.end_x, s.end_y,
+                                    o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
+                    _hit('segment', o)
+                    if first_only:
+                        return hits
+        if o_vias:
+            for i in _near(sx0, sx1, sy0, sy1, ovx, ovx, ovy, ovy, ov_half, hw):
+                v = o_vias[i]
+                thr = hw + v.size / 2.0 + _clr(s.net_id, v, s.layer, 'layer')
+                if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
+                                   s.end_x, s.end_y) < thr * thr:
+                    _hit('via', v)
+                    if first_only:
+                        return hits
 
     # Restored vias (span layers) vs other-net vias and segments.
     for vv in vias:
         vr = vv.size / 2.0
-        for v in o_vias:
-            thr = vr + v.size / 2.0 + _clr(vv.net_id, v, None, 'stack')
-            if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
-                _hit('via', v)
-                if first_only:
-                    return hits
-        for o in o_segs:
-            thr = vr + o.width / 2.0 + _clr(vv.net_id, o, o.layer, 'layer')
-            if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
-                               o.end_x, o.end_y) < thr * thr:
-                _hit('segment', o)
-                if first_only:
-                    return hits
+        if o_vias:
+            for i in _near(vv.x, vv.x, vv.y, vv.y, ovx, ovx, ovy, ovy, ov_half, vr):
+                v = o_vias[i]
+                thr = vr + v.size / 2.0 + _clr(vv.net_id, v, None, 'stack')
+                if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
+                    _hit('via', v)
+                    if first_only:
+                        return hits
+        if o_segs:
+            for i in _near(vv.x, vv.x, vv.y, vv.y, osx0, osx1, osy0, osy1, os_half, vr):
+                o = o_segs[i]
+                thr = vr + o.width / 2.0 + _clr(vv.net_id, o, o.layer, 'layer')
+                if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
+                                   o.end_x, o.end_y) < thr * thr:
+                    _hit('segment', o)
+                    if first_only:
+                        return hits
 
     return hits
 
