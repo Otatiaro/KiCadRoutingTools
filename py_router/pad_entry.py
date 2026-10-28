@@ -83,23 +83,38 @@ def row_pads(pcb_data, net_id: int) -> List:
     return out
 
 
-def flank_cells(pad, layer_indices: Iterable[int], config) -> np.ndarray:
+def flank_cells(pad, layer_indices: Iterable[int], config,
+                margins=None) -> np.ndarray:
     """(N, 3) track cells of `pad`'s two flanks on `layer_indices`.
 
     A centreline cell is a flank cell when it lies along the pad's length,
     extended past each end by the axial stub (|along| <= half-length +
     track + clearance), off the grid column nearest the axis
     (|lat| > half a grid step), and not yet clear of the pad's long side
-    (|lat| <= half-width + track/2 + clearance)."""
+    (|lat| <= half-width + track/2 + clearance).
+
+    `margins` (grid cells, indexed by layer index; default 0) is the A*
+    track margin of a track wider than the map's stamps: the search tests
+    every cell within that margin of a move, so the flank starts that many
+    cells further out, and the axis column stays the one column the wide
+    centreline may run on. Without it a wide track could not reach the pad
+    at all, and a search toward it would spend its whole budget. A flank
+    keeps at least its first column past the margin, which is enough to
+    refuse every centreline beside the pad up to that margin beyond it. The
+    flanks also run that many cells further past each end: with the margin
+    the search adds, the wide track leaves straight for its own width plus
+    clearance."""
     step = config.grid_step
     tw = config.track_width
     hw, hl, along_x = _axis(pad)
-    column = step / 2 + 1e-6
     outer = hw + tw / 2 + config.clearance
     reach = hl + tw + config.clearance
     cx, cy = pad.global_x, pad.global_y
+    m_max = max((margins[li] for li in layer_indices), default=0.0) if margins else 0.0
     # Grid ranges covering the pad's length, its stubs and both flank bands.
-    ext_x, ext_y = (reach, outer) if along_x else (outer, reach)
+    lat_ext = max(outer, (math.floor(m_max) + 2) * step)
+    along_ext = reach + m_max * step
+    ext_x, ext_y = (along_ext, lat_ext) if along_x else (lat_ext, along_ext)
     gx0, gx1 = math.floor((cx - ext_x) / step), math.ceil((cx + ext_x) / step)
     gy0, gy1 = math.floor((cy - ext_y) / step), math.ceil((cy + ext_y) / step)
     gxs = np.arange(gx0, gx1 + 1)
@@ -107,13 +122,26 @@ def flank_cells(pad, layer_indices: Iterable[int], config) -> np.ndarray:
     GX, GY = np.meshgrid(gxs, gys, indexing='ij')
     dx, dy = GX * step - cx, GY * step - cy
     d_along, d_lat = (dx, dy) if along_x else (dy, dx)
-    lat = np.abs(d_lat)
-    mask = (np.abs(d_along) <= reach + 1e-9) & (lat > column) & (lat <= outer + 1e-9)
-    xy = np.stack([GX[mask], GY[mask]], axis=1).astype(np.int32)
-    if not len(xy):
-        return np.empty((0, 3), dtype=np.int32)
-    rows = [np.hstack([xy, np.full((len(xy), 1), li, dtype=np.int32)])
-            for li in layer_indices]
+    # The axis column(s) as lateral grid indices: the columns within half a
+    # step of the axis (two when it falls exactly between them).
+    g_lat = GY if along_x else GX
+    u = (cy if along_x else cx) / step
+    lo = math.ceil(u - 0.5 - 1e-6 / step)
+    hi = math.floor(u + 0.5 + 1e-6 / step)
+    d_along = np.abs(d_along)
+    inside = np.abs(d_lat) <= outer + 1e-9
+    rows = []
+    for li in layer_indices:
+        m = margins[li] if margins is not None else 0.0
+        along = d_along <= reach + m * step + 1e-9
+        keep = inside
+        if m > 0:                              # the first column past the margin
+            first = math.floor(m + 1e-9) + 1
+            keep = inside | (g_lat == hi + first) | (g_lat == lo - first)
+        mask = along & keep & ((g_lat > hi + m + 1e-9) | (g_lat < lo - m - 1e-9))
+        if mask.any():
+            rows.append(np.stack([GX[mask], GY[mask],
+                                  np.full(int(mask.sum()), li)], axis=1).astype(np.int32))
     return np.concatenate(rows) if rows else np.empty((0, 3), dtype=np.int32)
 
 
@@ -174,13 +202,15 @@ def segment_crosses_flank(rects, x1, y1, x2, y2, layer) -> bool:
 
 
 def net_flank_cells(pcb_data, net_id: int, config) -> np.ndarray:
-    """(N, 3) flank cells of every row pad of `net_id`, unique."""
+    """(N, 3) flank cells of every row pad of `net_id`, unique, set back by
+    the net's A* track margin on each layer (`flank_cells`)."""
     layers = list(config.layers)
+    margins = config.track_margins_for_net(net_id)
     chunks = []
     for pad in row_pads(pcb_data, net_id):
         idx = [layers.index(l) for l in pad.layers if l in layers]
         if idx:
-            cells = flank_cells(pad, idx, config)
+            cells = flank_cells(pad, idx, config, margins)
             if len(cells):
                 chunks.append(cells)
     if not chunks:
