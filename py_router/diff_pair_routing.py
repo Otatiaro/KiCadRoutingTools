@@ -1684,12 +1684,19 @@ def _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data,
     A segment whose edge gap EQUALS the pair clearance is not a graze and keeps
     its width; a neck of a pair the hard gate passes is recorded in the
     design-rules ledger (site 'pair partner neck').
+
+    Under --escalation off nothing is necked: the graze stays at full width,
+    so the hard gate below reports it and the caller refuses the candidate,
+    as the terminal neck does (#842). It used to neck regardless, and a pair
+    whose terminals sit closer than the coupled pitch shipped its attach
+    segments at 0.1396 mm under a 0.2 mm request with the policy off.
     """
     from single_ended_routing import _fab_track_floor, NECK_GRAZE_TOL
     from pcb_modification import _seg_seg_min_dist
-    from fab_tiers import note_narrowing
+    from fab_tiers import note_narrowing, may_narrow
     floor = _fab_track_floor(pcb_data)
     necked = 0
+    _may_neck = may_narrow()
 
     # P and N are DIFFERENT NETS, so KiCad grades them at the pair's own
     # value on the layer they meet on (#1134, `config.pair_clearance`):
@@ -1739,7 +1746,7 @@ def _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data,
                 if clr - (d - o.width / 2.0 - s.width / 2.0) <= NECK_GRAZE_TOL:
                     continue
                 new_w = max(floor, 2.0 * (d - o.width / 2.0 - clr - 2e-4))
-                if new_w < s.width - 1e-9:
+                if new_w < s.width - 1e-9 and _may_neck:
                     requested.setdefault(id(s), (s, s.width))
                     s.width = round(new_w, 4)
                     necked += 1
@@ -5449,10 +5456,16 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
         # single-ended terminal SHORT gate does (#157).
         _s, _o, _gap = min(_hard318, key=lambda t: t[2])
         _need = config.pair_clearance(p_net_id, n_net_id, _s.layer)
+        from fab_tiers import may_narrow as _may_narrow
+        # Under --escalation off a positive gap was never necked: say so, it
+        # is a clearance graze the policy forbids fixing, not a short.
+        _why = ("--escalation off forbids necking it -- rejecting the pair "
+                "rather than shipping a clearance violation"
+                if _gap > 0 and not _may_narrow()
+                else "rejecting the pair rather than shipping a short")
         print(f"  WARNING: intra-pair clearance: P and N would sit "
               f"{_gap:.4f}mm apart on {_s.layer} (need {_need:.4f}mm) "
-              f"at ({_s.start_x:.3f},{_s.start_y:.3f}) -- rejecting the pair "
-              f"rather than shipping a short")
+              f"at ({_s.start_x:.3f},{_s.start_y:.3f}) -- {_why}")
         return {
             'failed': True,
             'intra_pair_short': True,
