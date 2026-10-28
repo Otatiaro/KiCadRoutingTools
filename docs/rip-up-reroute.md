@@ -97,8 +97,41 @@ In rough order of preference for a congestion retry:
    with `--force-reroute` over a large net list: that is the shape that cost
    `spartan6_4layer` 20 nets' copper.
 
-Whatever you pass, the [improvement gate](#improvement-gate-600) is the
-backstop: a run that ends net-worse is reverted rather than shipped.
+Whatever you pass, the [victim guard](#victim-guard) returns every net the
+run broke to its input copper, and the [improvement gate](#improvement-gate-600)
+reverts a run that still ends net-worse.
+
+## Victim guard
+
+A rip is a trade, and both halves of its custody can fail: the victim's
+reroute lands partial, or its restore is refused because the ripper now holds
+its corridor. The victim then ships broken while the ripper ships connected,
+and the gate below cannot see it when the trade is even -- one net connected
+for one broken is a draw, and a draw ships. Retry steps on a congested board
+do exactly that, step after step: two nets connected, two others broken.
+
+So at the end of the outermost run, on the board it ships (the written file
+on the CLI, the change-set on the GUI), every net that was connected on the
+input and is broken now -- or has more disconnected pads than it started
+with -- gets its **input copper** back, verbatim. A net whose new copper
+collides with that input copper returns to its input state too, and so on
+until nothing collides. The input copper of all those nets coexisted on the
+input board, so this always ends, and every net it touches ends exactly as
+it started: **no net ships worse than the run got it**, by construction. The
+gains that need no victim's corridor are kept.
+
+```
+  Victim guard: 1 net(s) this run had left broken returned to their input copper (V); 1 net(s) whose new copper held their corridor returned to their input state too (T)
+```
+
+It leaves to the gate a victim whose restore would also return a net whose
+**pads** this run changed (a pad swap, a moved footprint: input copper no
+longer reaches them) or a net that owns a **pour** (its connectivity is the
+fill's, which other copper also shapes), and names it. After restoring it
+re-grades, checks that the restored nets carry exactly their input copper and
+that nothing else got worse, and otherwise puts the board back. The GUI
+receives the report as `results_data['victim_guard']`.
+`KICAD_VICTIM_GUARD=0` disables it.
 
 ## Improvement gate (#600)
 
@@ -128,7 +161,10 @@ breaks one ships, provided the pad count did not rise — the recovered pads
 outnumber the lost ones, which is exactly when discarding the run would throw
 away more than it saves.
 
-An equal trade on both axes ships, reported with both net lists named:
+The [victim guard](#victim-guard) runs first, so a net this run broke reaches
+the gate broken only when the guard could not restore it (its closure reached
+a net whose pads or pour changed). An equal trade on both axes ships, reported
+with both net lists named:
 `bms_sensor`'s retry reproduced today closes the three nets it was asked to
 close, breaks three others, and leaves the pad count unchanged. The operator who
 passed `--rip-existing-nets` authorised that; what they could not do before was
