@@ -626,6 +626,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # #962: the input's vias as values, for the ship-time Type VII stamp
     from fab_notes import via_snapshot as _via_snapshot962
     _input_vias962 = _via_snapshot962(pcb_data.vias, pcb_data)  # #1171: + sites
+    # The input's tracks as values, for the shipped-width census at the end
+    from routing_common import segment_identity as _seg_id_in
+    _input_seg_keys = {_seg_id_in(_s, pcb_data.nets[_s.net_id].name
+                                  if _s.net_id in pcb_data.nets else f"Net {_s.net_id}")
+                       for _s in pcb_data.segments or ()}
     # KICAD_ROUTE_TRACE=1: the pairs' copper as laid, ripped and restored, for
     # route_movie.py (written beside the output at the end)
     from route_trace import attach as _attach_route_trace
@@ -2399,6 +2404,50 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             'via copper shipped under size')
     except Exception as _vre:                                   # noqa: BLE001
         print(f"  (via-size disclosure skipped: {_vre})")
+    # The track rows describe the tracks that SHIP, as the via rows above do.
+    # The pair partner neck and the terminal neck record a row per routing
+    # ATTEMPT, so a candidate the ladder then rejected (connector graze, P/N
+    # cross, a failed hybrid leg, a ripped pair) left its neck in the ledger:
+    # a run whose written copper was all at the requested width reported
+    # "4 features delivered below the requested size". Every track_width row
+    # of a net this run laid copper for or recorded is replaced by one row per
+    # net that still ships new copper under the width it was routed at.
+    try:
+        from routing_common import new_copper_width_shortfall
+        from fab_tiers import replace_track_rows, escalation_summary as _es_tw
+        _nm_tw = {_n: _nn.name for _n, _nn in pcb_data.nets.items()}
+        _id_tw = {_nm: _n for _n, _nm in _nm_tw.items()}
+        _geom_tw = getattr(state, 'pair_diff_geom', None) or {}
+        _pair_w = {}
+        for _pn, _pr in diff_pair_ids_to_route:
+            _w = _geom_tw.get(_pr.p_net_id, (config.track_width,))[0]
+            _pair_w[_pr.p_net_id] = _pair_w[_pr.n_net_id] = _w
+
+        def _asked_tw(_nm, _ly):
+            # a pair member is routed at its pair's width (#435), or the
+            # layer's impedance width; any other net at its own
+            _n = _id_tw.get(_nm)
+            if _n is None:
+                return None
+            if _n in _pair_w:
+                if config.layer_widths and _ly in config.layer_widths:
+                    return config.layer_widths[_ly]
+                return _pair_w[_n]
+            return config.get_net_track_width(_n, _ly)
+        _short_tw = new_copper_width_shortfall(
+            pcb_data.segments, lambda _n: _nm_tw.get(_n, f"Net {_n}"),
+            _input_seg_keys, _asked_tw)
+        _cover_tw = {_id_tw[_nm] for _nm in _short_tw if _nm in _id_tw}
+        _cover_tw |= {_r['net'] for _r in _es_tw()['narrowed']
+                      if _r.get('kind') == 'track_width'
+                      and _r.get('net') is not None}
+        replace_track_rows(
+            _cover_tw,
+            [(_id_tw[_nm], _nm, _r['requested_mm'], _r['min_mm'], _r['under_mm'])
+             for _nm, _r in _short_tw.items() if _nm in _id_tw],
+            'track copper shipped under width')
+    except Exception as _twe:                                   # noqa: BLE001
+        print(f"  (track-width disclosure skipped: {_twe})")
     # #857: what this run delivered below a requested size (route.py's
     # key), when it delivered anything there.
     from fab_tiers import narrowed_summary
