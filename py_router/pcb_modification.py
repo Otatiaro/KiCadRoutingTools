@@ -5442,15 +5442,18 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
     # The flanks of the net's own row pads (pad_entry): the route reached each
     # such pad along its axis, and a shortcut across a flank would hand back
-    # the side entry the router was kept out of.
+    # the side entry the router was kept out of. A cleanup config may carry
+    # no track width (the plane cleanup's: clearance and grid step): the
+    # flanks are then sized by the track being judged.
     from pad_entry import net_flank_rects, segment_crosses_flank
     _flanks = {}
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
         if config is not None:
-            if net_id not in _flanks:
-                _flanks[net_id] = net_flank_rects(pcb_data, net_id, config)
-            if segment_crosses_flank(_flanks[net_id], x1, y1, x2, y2, layer):
+            _tw = getattr(config, 'track_width', None) or w
+            if (net_id, _tw) not in _flanks:
+                _flanks[(net_id, _tw)] = net_flank_rects(pcb_data, net_id, config, _tw)
+            if segment_crosses_flank(_flanks[(net_id, _tw)], x1, y1, x2, y2, layer):
                 return False
         eff = pair_base(net_id, layer)
         pd = _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,

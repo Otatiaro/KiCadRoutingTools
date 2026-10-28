@@ -27,7 +27,9 @@ The flanks never cost a connection. While stamped they are on record for
 their map (`active`); a search that finds no way in through any end lifts
 them (`lifted`) and routes as before, from a pad's side, saying so on the
 console (single_ended_routing._route_with_via_unblock). A plane tap does the
-same with its whole parameter ladder (plane_pad_tap.tap_pad_with_escalation).
+same with its whole parameter ladder (plane_pad_tap.tap_pad_with_escalation),
+and so does a KiCad-oracle link, started from the centre of the row pad it is
+anchored on (`seeds_to_pad_centres`, `walled_copy`; kicad_oracle).
 
 A pad is a row pad when it is an SMD rectangle elongated along one axis
 (length >= 1.5 x width) with another pad of its footprint BESIDE it --
@@ -115,13 +117,16 @@ def flank_cells(pad, layer_indices: Iterable[int], config) -> np.ndarray:
     return np.concatenate(rows) if rows else np.empty((0, 3), dtype=np.int32)
 
 
-def flank_rects(pad, config) -> List[tuple]:
+def flank_rects(pad, config, track_width=None) -> List[tuple]:
     """`pad`'s two flanks as board-frame rectangles (x0, y0, x1, y1): the
-    region `flank_cells` rasterises, for copper that is not on the grid."""
+    region `flank_cells` rasterises, for copper that is not on the grid.
+    `track_width` overrides config.track_width (a cleanup config may carry
+    only clearance and grid_step)."""
+    tw = config.track_width if track_width is None else track_width
     hw, hl, along_x = _axis(pad)
     column = config.grid_step / 2 + 1e-6
-    outer = hw + config.track_width / 2 + config.clearance
-    reach = hl + config.track_width + config.clearance
+    outer = hw + tw / 2 + config.clearance
+    reach = hl + tw + config.clearance
     cx, cy = pad.global_x, pad.global_y
     out = []
     for lo, hi in ((column, outer), (-outer, -column)):
@@ -132,10 +137,10 @@ def flank_rects(pad, config) -> List[tuple]:
     return out
 
 
-def net_flank_rects(pcb_data, net_id: int, config) -> List[tuple]:
+def net_flank_rects(pcb_data, net_id: int, config, track_width=None) -> List[tuple]:
     """(layers, rect) of every flank of `net_id`'s row pads."""
     return [(set(pad.layers), r) for pad in row_pads(pcb_data, net_id)
-            for r in flank_rects(pad, config)]
+            for r in flank_rects(pad, config, track_width)]
 
 
 def segment_crosses_flank(rects, x1, y1, x2, y2, layer) -> bool:
@@ -314,3 +319,56 @@ def touched(obstacles, net_id: int, *frontiers) -> bool:
     held = {(int(x), int(y), int(l)) for x, y, l in cells}
     return any((int(c[0]), int(c[1]), int(c[2])) in held
                for f in frontiers if f for c in f)
+
+
+def seeds_to_pad_centres(pcb_data, net_id: int, seeds, config):
+    """`seeds` ((x, y) or (x, y, layer) points on the net's copper) with every
+    point lying on one of its row pads moved to that pad's centre -- the same
+    copper, so the same cluster -- and the row pads found. A link the oracle
+    anchors at its nearest approach starts on the FLANK of a row pad facing
+    its neighbour; started from the centre, a walled search leaves the pad
+    through an end. Returns (seeds, pads), seeds de-duplicated in order."""
+    pads, out, seen = [], [], set()
+    rows = row_pads(pcb_data, net_id)
+    for s in seeds:
+        x, y = s[0], s[1]
+        layer = s[2] if len(s) > 2 else None
+        for p in rows:
+            if layer is not None and layer not in p.layers:
+                continue
+            if (abs(x - p.global_x) <= p.size_x / 2 + config.track_width / 2
+                    and abs(y - p.global_y) <= p.size_y / 2 + config.track_width / 2):
+                x, y = p.global_x, p.global_y
+                if p not in pads:
+                    pads.append(p)
+                break
+        moved = (x, y) if layer is None else (x, y, layer)
+        if moved not in seen:
+            seen.add(moved)
+            out.append(moved)
+    return out, pads
+
+
+def walled_copy(obstacles, pcb_data, net_id: int, layers, config, seeds,
+                margin: float = 2.0):
+    """A clone of `obstacles` (layer i = `layers[i]`) with the flanks of the
+    net's row pads within `margin` of the `seeds`' box blocked: the map a
+    plane link is routed on first, so it lands through the pads' ends."""
+    xs = [s[0] for s in seeds]
+    ys = [s[1] for s in seeds]
+    x0, x1 = min(xs) - margin, max(xs) + margin
+    y0, y1 = min(ys) - margin, max(ys) + margin
+    chunks = []
+    for p in row_pads(pcb_data, net_id):
+        if not (x0 <= p.global_x <= x1 and y0 <= p.global_y <= y1):
+            continue
+        idx = [i for i, l in enumerate(layers) if l in p.layers]
+        if idx:
+            c = flank_cells(p, idx, config)
+            if len(c):
+                chunks.append(c)
+    if not chunks:
+        return None
+    walled = obstacles.clone()
+    walled.add_blocked_cells_batch(np.unique(np.concatenate(chunks), axis=0))
+    return walled

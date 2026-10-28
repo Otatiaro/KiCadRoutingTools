@@ -405,7 +405,9 @@ A pad tap (`plane_pad_tap.try_tap_pad`) blocks, in its trace map, the flanks of 
 its window (`pad_entry.py`, the same flanks the route step blocks): its trace reaches the tapped pad -- or a
 neighbouring same-net pad it reuses -- through an end, along the pad's axis, never down or across the gap
 between two pins of the package. A new via is not placed on such a flank either (in the pad, or on its axis
-past an end, it still may).
+past an end, it still may). The KiCad-oracle recheck's links follow the same rule: a link KiCad anchors on a row
+pad (its nearest approach between two neighbouring pins faces across the gap between them) starts from the pad's
+centre on a map with the net's row-pad flanks blocked, and routes as before only when that fails.
 
 #### Same-net pad clearance / via-in-pad
 
