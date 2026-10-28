@@ -116,6 +116,11 @@ REFUSED_TOOLS = {
         'mirrors parts onto the faces a floorplan intent declares (#1280); '
         'the plan format has no placement step. Run it BEFORE the plan and '
         'start the plan from its output'),
+    'swap_pins.py': (
+        'reassigns the nets of declared equivalent gates (a design brief\'s '
+        'pin_swaps[]) on a placed board; the plan format has no step that '
+        'rewrites pad nets. Run it BEFORE the plan and start the plan from '
+        'its output'),
     'render_placement.py': (
         'renders a PNG; it changes no board and has nothing to replay'),
     'beautify_labels.py': (
