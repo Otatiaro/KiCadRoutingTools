@@ -33,6 +33,11 @@ from kicad_parser import PCBData
 from routing_config import GridRouteConfig
 
 
+# Slack (mm) on _conflict_sweep's bbox-gap skip: it only sends more pairs to
+# the sampled test, so rounding never drops a conflict.
+_GAP_SLACK = 1e-6
+
+
 def _seg_points(s, step_mm: float = 0.2):
     n = max(2, int(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) / step_mm) + 1)
     for i in range(n + 1):
@@ -94,11 +99,20 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
     owners: set = set()
     for cand in segments:
         c_clr_half = cand.width / 2
+        # Every sample of cand lies in its bbox, so no sample is nearer to a
+        # board item than the gap between the two bboxes: an item at least
+        # `need` away by bbox cannot conflict, and is not sampled.
+        cx0, cx1 = min(cand.start_x, cand.end_x), max(cand.start_x, cand.end_x)
+        cy0, cy1 = min(cand.start_y, cand.end_y), max(cand.start_y, cand.end_y)
         for s in board_segs:
             if s.net_id in own_ids or s.layer != cand.layer \
                     or s.net_id in owners:
                 continue
             need = c_clr_half + s.width / 2 + _track_pair_clr(cand.net_id, s.net_id, cand.layer)
+            gx = max(min(s.start_x, s.end_x) - cx1, cx0 - max(s.start_x, s.end_x), 0.0)
+            gy = max(min(s.start_y, s.end_y) - cy1, cy0 - max(s.start_y, s.end_y), 0.0)
+            if gx * gx + gy * gy >= (need + _GAP_SLACK) ** 2:
+                continue
             if any(point_to_segment_distance(px, py, s.start_x, s.start_y,
                                              s.end_x, s.end_y) < need
                    for px, py in _seg_points(cand)):
@@ -109,6 +123,10 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
             if v.net_id in own_ids or v.net_id in owners:
                 continue
             need = c_clr_half + v.size / 2 + _pair_clr(cand.net_id, v.net_id, cand.layer)
+            gx = max(v.x - cx1, cx0 - v.x, 0.0)
+            gy = max(v.y - cy1, cy0 - v.y, 0.0)
+            if gx * gx + gy * gy >= (need + _GAP_SLACK) ** 2:
+                continue
             if any(math.hypot(px - v.x, py - v.y) < need for px, py in _seg_points(cand)):
                 owners.add(v.net_id)
                 if not collect:
