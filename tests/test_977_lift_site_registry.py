@@ -114,7 +114,7 @@ REGISTRY = {
     ('py_router/bga_fanout/__init__.py', '_generate_bga_fanout_core'): (
         NO_LIFT, 'BGA fanout escapes; built for every fanned net at once, so '
                  'the old bake never fired here either'),
-    ('py_router/qfn_fanout/__init__.py', 'generate_qfn_fanout'): (
+    ('py_router/qfn_fanout/__init__.py', '_generate_qfn_fanout'): (
         NO_LIFT, 'QFN fanout; as for BGA fanout'),
     ('py_router/qfn_fanout/__init__.py', '_underpad_via_escape'): (
         NO_LIFT, 'QFN under-pad escape; as for BGA fanout'),

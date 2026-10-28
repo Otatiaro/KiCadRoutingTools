@@ -2330,6 +2330,11 @@ def _generate_qfn_fanout(footprint: Footprint,
     return tracks, [], failed_nets
 
 
+# The wrapper takes *args/**kwargs: give it the engine's own signature, so callers that
+# introspect the public entry (the GUI kwarg parity gates) see the same parameters.
+import inspect as _inspect
+generate_qfn_fanout.__signature__ = _inspect.signature(_generate_qfn_fanout)
+
 
 def autopick_rank(fp):
     """The CLI's QFN/QFP auto-pick key: name evidence, then PIN count.
