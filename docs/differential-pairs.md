@@ -528,6 +528,14 @@ identify which pairs on your board are high-speed if uncertain.
 
 Simple straight connectors link the original stub endpoints to the corresponding P/N track start/end points.
 
+**Off a fine-pitch row** (a pair on two neighbouring pins of a QFP, QFN, SOIC or
+SSOP, whose escape runs along the pads' long axis; row pads as `pad_entry.py`
+defines them), each connector first runs straight along its pad's axis to one
+track width plus clearance past the end, and only then turns toward its partner.
+The setback is measured from the end of that run, and is at least the 45-degree
+length of the taper from the pad pitch to the pair pitch, so the pair joins
+beyond the pads instead of in the gap between them (`_row_pad_axial_lead`).
+
 ## Inner-Layer Launch via Escape Vias
 
 The setback search (above) launches the coupled pair from the **stub's own
@@ -570,7 +578,12 @@ from the terminal escapes (`_route_direct_coupled_middle`):
    escape-direction setback, no connectors, no polarity stage. Candidate layers
    are all routing layers (preferring those an existing via barrel spans, then
    inner, then `F.Cu`/`B.Cu`). Offset the centerline into a clean parallel P/N
-   pair. The pair runs the open corridor as close to each terminal as it can.
+   pair. The pair runs the open corridor as close to each terminal as it can,
+   but clear of the pair's own row pads with their flanks and the axial run past
+   their ends (`pad_entry.entry_rect`), on every layer: the pair's pads are free
+   copper on the diff-pair map, so the closest clear launch to two neighbouring
+   pins was otherwise the gap between them, where each leg could only enter its
+   pad from the side. Where no launch clears them, the closest clear one is kept.
 
 2. **Polarity by the pads' sides.** There is no coupled polarity stage. Each end
    votes for the offset side its P pad lies on, relative to the local centerline
@@ -592,6 +605,13 @@ from the terminal escapes (`_route_direct_coupled_middle`):
    map, so re-added here) — is added as an obstacle, so a side-swap leg routes
    *around* it. That is where polarity is resolved: at the pads, by independent A*,
    with no coupled crossing.
+
+   **Row pads are landed through their ends.** A leg blocks the flanks of its
+   net's row pads while it routes (`pad_entry.stamp`), like a single-ended
+   route. Every leg order is tried that way first; only when none attaches all
+   the legs are the orders tried again with the flanks open, and the console says
+   so ("no way in through a row pad's ends, hybrid legs routed entering from a
+   pad's side"). The seam re-ask routes walled when the legs were.
 
    **Boxed-endpoint handling.** A bare-pad stub tip can sit in a foreign keep-out
    tight enough that the leg can't get a via in *at the tip* — but a via still
