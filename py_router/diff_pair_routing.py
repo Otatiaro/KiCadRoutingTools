@@ -4807,7 +4807,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     into `base_obstacles`, the map the terminal connectors are checked
     against (_try_route_direction), at the plain one: a connector is one
     member's track."""
-    if not getattr(pcb_data, '_net_keepouts', None):
+    from net_keepouts import active as _nk_active
+    if not _nk_active(pcb_data):
         return _route_diff_pair_with_obstacles_impl(pcb_data, diff_pair, config, obstacles,
                                                     *args, **kwargs)
     from net_keepouts import stamp as _nk_stamp, centerline_config

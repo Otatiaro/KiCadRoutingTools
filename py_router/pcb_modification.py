@@ -5245,6 +5245,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                            npth_slot_capsules, segment_to_npth_slots_distance)
     from connectivity import COINCIDENCE_TOL
     from obstacle_map import resolve_hole_clearance
+    from dru_copper_rules import track_clears as _copper_rule_clears
 
     # #1038: the board's DECLARED copper-to-hole floor, not the flat 0.20. The
     # smoother CHOOSES where new copper goes (a shortcut replacing a staircase
@@ -5455,7 +5456,10 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         ok = (d >= eff + w / 2.0 - 1e-4 and
               hd >= npth_clr + w / 2.0 - 1e-4 and
               edge_clears(x1, y1, x2, y2, w) and
-              keepout_clears(x1, y1, x2, y2, layer, w, net_id))
+              keepout_clears(x1, y1, x2, y2, layer, w, net_id) and
+              # the board's net-pair / pad hole-clearance rules, which the
+              # router stamped while the net routed (dru_copper_rules)
+              _copper_rule_clears(pcb_data, net_id, x1, y1, x2, y2, layer, w))
         if _665trace and ok:
             # #665 forensics: re-check the pad distance with a FRESH pad
             # array (cache detached); a disagreement = a stale/poisoned
