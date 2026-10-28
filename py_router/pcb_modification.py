@@ -3931,21 +3931,42 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
 
 def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
                       fgrid, fcell: float, fmax_rad: float, clearance: float,
-                      protected_ids=None):
-    """Reduce one net's routed copper to a spanning tree (forest if split).
+                      protected_ids=None, net_zones=None, copper_layers=None):
+    """Reduce one net's track copper to a spanning tree (forest if split).
 
     Builds a spanning tree by union-find over the segments, so every segment that
     would close a cycle (endpoints already connected) is REDUNDANT and removed,
     while every structural (bridge) segment is kept -- connectivity is preserved
-    exactly. Nodes are keyed by (x, y, layer); vias and through-hole pads join the
-    layer-nodes at their location (a via/TH pad connects all copper there), so
-    cross-layer connectivity is modelled and inter-layer loops are found.
+    exactly. Nodes are keyed by (x, y, layer); a via joins the layer-nodes at its
+    location and a pad joins every track end landing in its copper, so
+    cross-layer loops and loops closed through a pad (two branches landing on
+    one pad at different points) are found.
 
-    Segments are processed non-grazing-and-short first, so a segment that grazes
-    foreign copper (within ``clearance``) is the one left as the redundant cycle
-    edge and dropped (removing a graze that sits on a loop, e.g. the RAM_A9 short,
-    for free). Returns (kept, removed)."""
-    if len(net_segs) < 3:
+    A loop is broken by removing one whole BRANCH -- the run of segments
+    between two junctions (a pad, a via, a tee or a vertex where three ends
+    meet) -- never a single segment of it, and the branch that goes is the one
+    carrying the least current: segments are processed widest-neck branch first
+    (its narrowest segment), then lowest resistance (sum of length outside pad
+    and via copper over width), so a thin track beside a power trunk goes and
+    the trunk stays, and of a track and the micro-segments stacked on it the
+    track stays. Among branches of one neck, a branch with a segment that
+    grazes foreign copper (within ``clearance``) goes first (removing a graze
+    that sits on a loop, e.g. the RAM_A9 short, for free).
+
+    Zones are given no credit: the graph is tracks, vias and pads, so on a net
+    with a pour only TRACK loops are broken, and a plane tap (a leaf branch to
+    its via) is on no loop. ``net_zones`` are the net's pours: a branch lying in
+    one on its own layer may be what ties that pour together, so it is kept.
+
+    A removal never leaves a new free end (the stub left past a vertex the
+    clustering merged goes with its branch), never leaves a via joining fewer
+    layers than it did (check_weird's via grading, zones not credited), and
+    never takes copper lying wholly inside one pad or via unless it exactly
+    duplicates a kept segment at least as wide -- other in-pad copper may be
+    what widens a joint (#416), and the strict collapse grades it.
+    ``copper_layers`` (the board's stack) places blind and buried vias.
+    Returns (kept, removed)."""
+    if len(net_segs) < 2:
         return net_segs, []
     from connectivity import COINCIDENCE_TOL
     tol = COINCIDENCE_TOL  # THE endpoint coincidence tolerance (#320)
@@ -4009,19 +4030,46 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
         else:
             _first_in_cluster[r] = a
 
-    # Vias and through-hole pads bridge layers: union all ports within the
-    # connector's copper reach (size/4, >= tol), regardless of layer.
-    def join_near(cx, cy, reach):
-        near = [i for i in range(n) if math.hypot(ports[i][0] - cx, ports[i][1] - cy) < reach]
-        for j in near[1:]:
-            punion(near[0], j)
+    # Ports bucketed by cell, so the via / pad joins below are local.
+    from collections import defaultdict
+    _PCELL = 1.0
+    pgrid = defaultdict(list)
+    for i, p in enumerate(ports):
+        pgrid[(int(p[0] // _PCELL), int(p[1] // _PCELL))].append(i)
 
+    def ports_near(cx, cy, reach):
+        lo_x, hi_x = int((cx - reach) // _PCELL), int((cx + reach) // _PCELL)
+        lo_y, hi_y = int((cy - reach) // _PCELL), int((cy + reach) // _PCELL)
+        for gx in range(lo_x, hi_x + 1):
+            for gy in range(lo_y, hi_y + 1):
+                yield from pgrid.get((gx, gy), ())
+
+    # A via bridges layers and a pad joins its copper: every port landing in
+    # a via's barrel on one of its layers, or in a pad's copper on that layer
+    # (the shared endpoint-in-via / endpoint-in-pad predicates), joins that
+    # via's or pad's node, so two branches reaching one via or pad at
+    # different points meet at one node. ``term_items`` keeps, per port, the
+    # vias and pads its node stands for.
+    term_items = defaultdict(list)    # port index -> [via or pad]
     for v in (net_vias or []):
-        join_near(v.x, v.y, max(getattr(v, 'size', 0.6) / 4.0, tol))
+        near = [i for i in ports_near(v.x, v.y, (getattr(v, 'size', 0.6) or 0.6) / 2.0 + tol)
+                if endpoint_reaches_via(ports[i][0], ports[i][1], tol, v,
+                                        (ports[i][2],))]
+        for j in near:
+            punion(near[0], j)
+            term_items[j].append(v)
     for pad in (net_pads or []):
-        if getattr(pad, 'drill', 0) and pad.drill > 0:
-            reach = max(max(pad.size_x, pad.size_y) / 4.0, tol)
-            join_near(getattr(pad, 'global_x', 0.0), getattr(pad, 'global_y', 0.0), reach)
+        px, py = getattr(pad, 'global_x', 0.0), getattr(pad, 'global_y', 0.0)
+        reach = math.hypot(pad.size_x, pad.size_y) / 2.0
+        for poly in (getattr(pad, 'polygons', None) or []):
+            for qx, qy in poly:
+                reach = max(reach, math.hypot(qx - px, qy - py))
+        near = [i for i in ports_near(px, py, reach + tol)
+                if endpoint_reaches_pad(ports[i][0], ports[i][1], tol,
+                                        (ports[i][2],), pad)]
+        for j in near:
+            punion(near[0], j)
+            term_items[j].append(pad)
 
     # --- Phase 2: T-junction-aware spanning tree; redundant segments removed ---
     # A segment "touches" its two endpoint clusters AND any cluster that lies on
@@ -4029,32 +4077,127 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
     # lands on the other's interior, so overlapping copper is caught the same way.
     # Keeping a segment connects every node it touches; a segment all of whose
     # touched nodes are already connected adds no connectivity -- it is a loop /
-    # overlap and is removed. Processed non-grazing-and-short first so a grazing or
-    # overlapping segment is the redundant one dropped.
-    from collections import defaultdict
+    # overlap and is removed. Processed lowest-resistance branch first, grazing
+    # branches last, so the branch left closing each loop is the one to drop.
     from check_connected import point_on_segment, points_match
 
     reps = {}
     rep_layers = defaultdict(set)
+    rep_terms = defaultdict(list)    # node -> the vias / pads it stands for
+    rep_ends = defaultdict(int)      # node -> segment ends landing on it
     for i in range(n):
         r = pfind(i)
         reps.setdefault(r, (ports[i][0], ports[i][1]))
         rep_layers[r].add(ports[i][2])
-    rep_items = list(reps.items())
+        rep_terms[r].extend(term_items.get(i, ()))
+        rep_ends[r] += 1
+    rgrid = defaultdict(list)
+    for r, (cx, cy) in reps.items():
+        rgrid[(int(cx // _PCELL), int(cy // _PCELL))].append(r)
 
     touched = []
+    teed = set()                     # nodes some segment touches mid-body
     for i, s in enumerate(net_segs):
         ra, rb = pfind(2 * i), pfind(2 * i + 1)
         nodes = {ra, rb}
         if ra != rb:
-            for r, (cx, cy) in rep_items:
-                if r == ra or r == rb or s.layer not in rep_layers[r]:
-                    continue
-                if point_on_segment(cx, cy, s.start_x, s.start_y, s.end_x, s.end_y, tol) \
-                   and not points_match(cx, cy, s.start_x, s.start_y, tol) \
-                   and not points_match(cx, cy, s.end_x, s.end_y, tol):
-                    nodes.add(r)
+            lo_x = int((min(s.start_x, s.end_x) - tol) // _PCELL)
+            hi_x = int((max(s.start_x, s.end_x) + tol) // _PCELL)
+            lo_y = int((min(s.start_y, s.end_y) - tol) // _PCELL)
+            hi_y = int((max(s.start_y, s.end_y) + tol) // _PCELL)
+            for gx in range(lo_x, hi_x + 1):
+                for gy in range(lo_y, hi_y + 1):
+                    for r in rgrid.get((gx, gy), ()):
+                        if r == ra or r == rb or s.layer not in rep_layers[r]:
+                            continue
+                        cx, cy = reps[r]
+                        if point_on_segment(cx, cy, s.start_x, s.start_y, s.end_x, s.end_y, tol) \
+                           and not points_match(cx, cy, s.start_x, s.start_y, tol) \
+                           and not points_match(cx, cy, s.end_x, s.end_y, tol):
+                            nodes.add(r)
+                            teed.add(r)
         touched.append(nodes)
+
+    # Branches: segments chained through plain vertices -- exactly two ends,
+    # no pad, via or tee there -- so a loop is broken by removing the whole
+    # run between two junctions, never by leaving half of it as a spur. A
+    # segment with a tee on its body ends a branch: the tee's copper hangs on it.
+    bpar = list(range(len(net_segs)))
+
+    def bfind(x):
+        while bpar[x] != x:
+            bpar[x] = bpar[bpar[x]]
+            x = bpar[x]
+        return x
+
+    at_node = defaultdict(list)
+    for i in range(len(net_segs)):
+        if len(touched[i]) > 2:
+            continue
+        for p in (2 * i, 2 * i + 1):
+            at_node[pfind(p)].append(i)
+    for r, segs_here in at_node.items():
+        if (len(segs_here) == 2 and segs_here[0] != segs_here[1]
+                and rep_ends[r] == 2 and not rep_terms[r] and r not in teed):
+            ra, rb = bfind(segs_here[0]), bfind(segs_here[1])
+            if ra != rb:
+                bpar[ra] = rb
+
+    def outside_len(i):
+        # Length of segment i outside the via / pad copper its ends land in:
+        # a tap running to a pad's centre is no longer than its visible part.
+        s = net_segs[i]
+        L = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+        if L <= 0.0:
+            return 0.0
+
+        def inside(t, items):
+            x = s.start_x + t * (s.end_x - s.start_x)
+            y = s.start_y + t * (s.end_y - s.start_y)
+            for it in items:
+                if hasattr(it, 'component_ref'):
+                    if endpoint_reaches_pad(x, y, tol, (s.layer,), it):
+                        return True
+                elif math.hypot(x - it.x, y - it.y) < getattr(it, 'size', 0.6) / 2.0:
+                    return True
+            return False
+
+        cut = []
+        for p, t0 in ((2 * i, 0.0), (2 * i + 1, 1.0)):
+            items = rep_terms.get(pfind(p), ())
+            if not items or not inside(t0, items):
+                cut.append(0.0)
+                continue
+            if inside(1.0 - t0, items):
+                return 0.0
+            lo, hi = 0.0, 1.0     # fraction from this end: lo inside, hi outside
+            for _ in range(20):
+                mid = (lo + hi) / 2.0
+                if inside(t0 + (mid if t0 == 0.0 else -mid), items):
+                    lo = mid
+                else:
+                    hi = mid
+            cut.append(lo)
+        return L * max(0.0, 1.0 - cut[0] - cut[1])
+
+    br_res = defaultdict(float)
+    br_graze = defaultdict(bool)
+    br_neck = {}                     # branch -> its narrowest segment
+    for i, s in enumerate(net_segs):
+        b = bfind(i)
+        br_res[b] += outside_len(i) / max(s.width or 0.0, 1e-3)
+        br_neck[b] = min(br_neck.get(b, math.inf), s.width or 0.0)
+        if grazes(s):
+            br_graze[b] = True
+    branch_of = [bfind(i) for i in range(len(net_segs))]
+
+    def keep_rank(b):
+        # Kept first: the widest neck, then no graze, then the least
+        # resistance. The neck decides first: a power trunk grazing a pad
+        # still outranks a thin track beside it, and a run of short pieces
+        # laid over a wider track (stacked copper: every vertex a tee on the
+        # track) is many tiny branches, each less resistive than the track.
+        return (-round(br_neck[b], 4), br_graze[b], br_res[b])
 
     cpar = {r: r for r in reps}
 
@@ -4065,78 +4208,212 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
         return x
 
     order = sorted(range(len(net_segs)),
-                   key=lambda i: (grazes(net_segs[i]),
+                   key=lambda i: (keep_rank(branch_of[i]),
                                   math.hypot(net_segs[i].end_x - net_segs[i].start_x,
                                              net_segs[i].end_y - net_segs[i].start_y)))
+    def span(s):
+        a = (round(s.start_x, 4), round(s.start_y, 4))
+        b = (round(s.end_x, 4), round(s.end_y, 4))
+        return (s.layer, min(a, b), max(a, b))
+
+    kept_span = {}                   # span -> widest kept width on it
     kept, removed = [], []
     for i in order:
+        s = net_segs[i]
+        if len(touched[i]) == 1:
+            # Both ends on one node: copper inside a pad or a via. Not a loop
+            # this pass breaks -- removing it can thin the joint of the track
+            # it extends into the pad (#416); the strict collapse grades it.
+            # An exact duplicate of a kept segment no wider than it is the
+            # exception: its removal changes no copper (stacked copper, #606).
+            if kept_span.get(span(s), -1.0) >= (s.width or 0.0):
+                removed.append(s)
+            else:
+                kept.append(s)
+                kept_span[span(s)] = max(kept_span.get(span(s), 0.0), s.width or 0.0)
+            continue
         roots = {cfind(r) for r in touched[i]}
         if len(roots) <= 1:
-            removed.append(net_segs[i])  # adds no new connectivity -> redundant loop/overlap
+            removed.append(s)  # adds no new connectivity -> redundant loop/overlap
         else:
             base = next(iter(touched[i]))
             for r in touched[i]:
                 ra, rb = cfind(base), cfind(r)
                 if ra != rb:
                     cpar[ra] = rb
-            kept.append(net_segs[i])
+            kept.append(s)
+            kept_span[span(s)] = max(kept_span.get(span(s), 0.0), s.width or 0.0)
 
     if not removed:
         return kept, []
     # Validate each PROPOSED removal against the authoritative connectivity oracle.
     # The clustering above can over-merge (its tolerances differ from
     # check_connected's), so a proposed-redundant segment may actually be
-    # load-bearing; checking each removal guarantees we never split the net. Drop
-    # grazing, then longer, candidates first.
-    from check_connected import check_net_connectivity
+    # load-bearing; checking each removal guarantees we never split the net. Each
+    # proposed edge stands for its whole branch; grazing, then highest-resistance
+    # branches go first. The check credits no zone: on a net whose pads meet
+    # only through its pour the track graph starts split, and the gate is then
+    # that no removal splits it further.
+    from check_connected import check_net_connectivity, point_in_polygon
     base = check_net_connectivity(net_id, net_segs, net_vias, net_pads)
-    if base.get('connected') is False:
+    if base.get('connected') is False and not net_zones:
         return net_segs, []
+    base_connected = bool(base.get('connected'))
     base_comps = base.get('num_components') or 1
     base_disc = len(base.get('disconnected_pads') or [])
-    # Pad coverage points, mirroring sweep_dead_ends' via-support model exactly.
-    pad_cover = []
-    for p in (net_pads or []):
-        px = getattr(p, 'global_x', getattr(p, 'x', 0.0))
-        py = getattr(p, 'global_y', getattr(p, 'y', 0.0))
-        ps = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
-        pad_cover.append((px, py, ps))
+    # Pad coverage, mirroring sweep_dead_ends' via-support model exactly: a
+    # via survives the sweep only if a kept same-net segment endpoint lands
+    # within 0.05mm of it, or a pad covers it.
+    via_anchors = []      # per via: segment indices anchoring it, or None if a pad covers it
+    for v in (net_vias or []):
+        if any(math.hypot(v.x - getattr(p, 'global_x', getattr(p, 'x', 0.0)),
+                          v.y - getattr(p, 'global_y', getattr(p, 'y', 0.0)))
+               < max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5)) / 2 + 0.05
+               for p in (net_pads or [])):
+            via_anchors.append(None)
+            continue
+        via_anchors.append({i for i in ports_near(v.x, v.y, 0.05)
+                            if math.hypot(v.x - ports[i][0], v.y - ports[i][1]) < 0.05})
+    via_anchors = [None if a is None else {p // 2 for p in a} for a in via_anchors]
 
-    def supported_vias(seglist):
-        # A via survives sweep_dead_ends only if a kept same-net segment endpoint
-        # lands within 0.05mm of it, or a pad covers it (see sweep_dead_ends).
-        out = set()
-        for i, v in enumerate(net_vias or []):
-            if any(math.hypot(v.x - sg.start_x, v.y - sg.start_y) < 0.05 or
-                   math.hypot(v.x - sg.end_x, v.y - sg.end_y) < 0.05 for sg in seglist) \
-               or any(math.hypot(v.x - cx, v.y - cy) < cs / 2 + 0.05
-                      for cx, cy, cs in pad_cover):
-                out.add(i)
+    # check_weird's via grading (via_support_parts, zones not credited, as
+    # in the strict model): the layers whose copper reaches each barrel. A
+    # removal may not leave a via joining fewer layers than two when it
+    # joined two (KiCad's via_dangling), nor joining none when it joined one.
+    from check_weird import via_support_parts
+    _cl = sorted({s.layer for s in net_segs}
+                 | {L for v in (net_vias or []) for L in (getattr(v, 'layers', None) or ())
+                    if L.endswith('.Cu')} | {'F.Cu', 'B.Cu'})
+    sgrid = defaultdict(list)
+    for i, s in enumerate(net_segs):
+        hw = (s.width or 0.0) / 2.0
+        for gx in range(int((min(s.start_x, s.end_x) - hw) // _PCELL),
+                        int((max(s.start_x, s.end_x) + hw) // _PCELL) + 1):
+            for gy in range(int((min(s.start_y, s.end_y) - hw) // _PCELL),
+                            int((max(s.start_y, s.end_y) + hw) // _PCELL) + 1):
+                sgrid[(gx, gy)].append(i)
+    via_fixed, via_by_layer = [], []
+    seg_vias = defaultdict(set)
+    for j, v in enumerate(net_vias or []):
+        reach = (getattr(v, 'size', 0.6) or 0.6) / 2.0
+        near = sorted({i for gx in range(int((v.x - reach) // _PCELL), int((v.x + reach) // _PCELL) + 1)
+                       for gy in range(int((v.y - reach) // _PCELL), int((v.y + reach) // _PCELL) + 1)
+                       for i in sgrid.get((gx, gy), ())})
+        span, fixed, by_seg = via_support_parts(v, [net_segs[i] for i in near],
+                                                net_pads or [], [], copper_layers or _cl)
+        by_layer = defaultdict(set)
+        for k, L in by_seg.items():
+            by_layer[L].add(near[k])
+            seg_vias[near[k]].add(j)
+        via_fixed.append(set(fixed) if len(span) >= 2 else None)
+        via_by_layer.append(by_layer)
+
+    def via_layers(j, excl):
+        return len(via_fixed[j] | {L for L, ss in via_by_layer[j].items() if ss - excl})
+
+    def via_worse(gone_now, trial_gone):
+        for j in {j for i in trial_gone - gone_now for j in seg_vias.get(i, ())}:
+            if via_fixed[j] is None:
+                continue
+            if min(via_layers(j, trial_gone), 2) < min(via_layers(j, gone_now), 2):
+                return True
+        return False
+
+    def in_own_pour(i):
+        s = net_segs[i]
+        L = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+        k = max(1, int(L / 0.25))
+        for z in net_zones or ():
+            if z.layer != s.layer or len(z.polygon or ()) < 3:
+                continue
+            for j in range(k + 1):
+                t = j / k
+                if point_in_polygon(s.start_x + t * (s.end_x - s.start_x),
+                                    s.start_y + t * (s.end_y - s.start_y), z.polygon):
+                    return True
+        return False
+
+    index_of = {id(s): i for i, s in enumerate(net_segs)}
+    members = defaultdict(list)
+    for i, b in enumerate(branch_of):
+        members[b].append(i)
+    units = []
+    for b in dict.fromkeys(branch_of[index_of[id(s)]] for s in removed):
+        units.append(b)
+    units.sort(key=lambda b: (round(br_neck[b], 4), not br_graze[b], -br_res[b],
+                              min((net_segs[i].layer, net_segs[i].start_x, net_segs[i].start_y)
+                                  for i in members[b])))
+
+    def holds(trial_gone):
+        trial = [s for i, s in enumerate(net_segs) if i not in trial_gone]
+        t = check_net_connectivity(net_id, trial, net_vias, net_pads)
+        if base_connected and not t.get('connected'):
+            return False
+        return ((t.get('num_components') or 1) <= base_comps
+                and len(t.get('disconnected_pads') or []) <= base_disc)
+
+    node_segs = defaultdict(list)    # node -> segments touching it (ends or body)
+    for i, nodes in enumerate(touched):
+        for r in nodes:
+            node_segs[r].append(i)
+
+    def spurs(gone_now, unit):
+        # Segments the removal leaves as a new free end (off any pad or via):
+        # their node had other copper and now has only them. On off-grid
+        # input copper a branch can end on a vertex the clustering merged
+        # with a neighbour's, and the stub past it would ship dangling (KiCad
+        # track_dangling) -- the overlap credit hides it from the sweep.
+        out = set(unit)
+        grew = True
+        while grew:
+            grew = False
+            excl = gone_now | out
+            for i in {k for j in out for r in touched[j] for k in node_segs[r]} - excl:
+                for p in (2 * i, 2 * i + 1):
+                    r = pfind(p)
+                    if rep_terms[r]:
+                        continue
+                    if (len([k for k in node_segs[r] if k not in excl]) == 1
+                            and len([k for k in node_segs[r] if k not in gone_now]) >= 2):
+                        out.add(i)
+                        grew = True
+                        break
         return out
 
-    cur = list(net_segs)
-    cur_supported = supported_vias(cur)
-    safe_removed = []
-    for s in sorted(removed, key=lambda s: (not grazes(s),
-                    -math.hypot(s.end_x - s.start_x, s.end_y - s.start_y))):
-        if protected_ids and id(s) in protected_ids:
-            continue  # read-only input copper: a loop through it stays closed
-        trial = [x for x in cur if x is not s]
-        t = check_net_connectivity(net_id, trial, net_vias, net_pads)
-        if not (t.get('connected') and (t.get('num_components') or 1) <= base_comps
-                and len(t.get('disconnected_pads') or []) <= base_disc):
+    gone = set()
+    accepted = []
+    for b in units:
+        unit = [i for i in members[b] if i not in gone]
+        if not unit:
             continue
+        unit = sorted(spurs(gone, unit))
+        if protected_ids and any(id(net_segs[i]) in protected_ids for i in unit):
+            continue  # read-only input copper: a loop through it stays closed
+        if net_zones and any(in_own_pour(i) for i in unit):
+            continue  # the branch may be what ties its pour together
+        trial_gone = gone | set(unit)
         # Don't strip the last segment anchoring a via: check_net_connectivity
         # credits via-copper overlap and reports "still connected", but
         # sweep_dead_ends would then cull the now-unsupported via and disconnect
         # the net (issue #209). Reject any removal that drops a via's support.
-        trial_supported = supported_vias(trial)
-        if trial_supported < cur_supported:
+        if any(a is not None and (a - gone) and not (a - trial_gone)
+               for a in via_anchors):
             continue
-        cur = trial
-        cur_supported = trial_supported
-        safe_removed.append(s)
-    return cur, safe_removed
+        if via_worse(gone, trial_gone):
+            continue
+        gone = trial_gone
+        accepted.append(unit)
+    # Each branch closes its own loop of the spanning tree, so removing them
+    # all keeps the tree: one oracle call grades the lot on a big plane net.
+    # Only when the clustering over-merged somewhere is each branch graded
+    # on its own.
+    if gone and not holds(gone):
+        gone = set()
+        for unit in accepted:
+            if holds(gone | set(unit)):
+                gone |= set(unit)
+    cur = [s for i, s in enumerate(net_segs) if i not in gone]
+    return cur, [net_segs[i] for i in sorted(gone)]
 
 
 def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
@@ -4150,9 +4427,14 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
     same-net copper to reconnect pads WITHOUT enforcing acyclicity, so cycles
     accumulate (e.g. RAM_A9: 3 loops / 27 segments for a 3-pad net, with the short
     sitting on a loop edge). This breaks every cycle by dropping a redundant
-    (non-bridge) segment, keeping all pads/vias connected, preferring to drop one
-    that grazes foreign copper. Nets with a copper pour/zone are skipped (planes
-    are meshes, not trees). Mirrors sweep_dead_ends' write-list sync; also drops
+    (non-bridge) branch, keeping all pads/vias connected: the one with the
+    narrowest neck, then one that grazes foreign copper, then the one of
+    highest resistance (see _prune_net_cycles). Loops closed
+    through a pad count, and so do loops on a net with a pour: the graph is the
+    net's tracks, vias and pads, with no zone credit, so only TRACK loops are
+    broken (a plane tap is a leaf, on no loop) -- except a branch lying in a
+    pour of its net on its own layer, which may tie that pour together (#606's
+    caution) and is kept. Mirrors sweep_dead_ends' write-list sync; also drops
     removed routed copper from pcb_data so the later passes see the tree.
 
     Returns (segments_removed, nets_pruned, original_segments_to_remove)."""
@@ -4189,7 +4471,12 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
     for it in foreign:
         fgrid[(int(it[0] // _FCELL), int(it[1] // _FCELL))].append(it)
 
-    zoned_nets = {z.net_id for z in (getattr(pcb_data, 'zones', []) or [])}
+    _copper_layers = list(getattr(pcb_data.board_info, 'copper_layers', None) or []) or None
+    # Teardrops are generated track output, not pours.
+    zones_by_net = defaultdict(list)
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        if not getattr(z, 'teardrop', False):
+            zones_by_net[z.net_id].append(z)
     segs_by_net = defaultdict(list)
     for s in pcb_data.segments:
         if scope_net_ids is None or s.net_id in scope_net_ids:
@@ -4206,8 +4493,6 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
     for v in pcb_data.vias:
         vias_by_net[v.net_id].append(v)
     for net_id, net_segs in segs_by_net.items():
-        if net_id in zoned_nets:  # planes / pours are meshes, not trees
-            continue
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_vias = vias_by_net.get(net_id, [])
         _protected = ({id(s) for s in net_segs
@@ -4216,7 +4501,9 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
                       or None)
         kept, removed = _prune_net_cycles(net_id, net_segs, net_vias,
                                           net_pads, fgrid, _FCELL, fmax_rad, clearance,
-                                          protected_ids=_protected)
+                                          protected_ids=_protected,
+                                          net_zones=zones_by_net.get(net_id),
+                                          copper_layers=_copper_layers)
         # #319: never break a "loop" whose alternate path is only a soft joint.
         kept, removed = _restore_soft_joint_bridges(kept, removed, net_vias, net_pads)
         if not removed:
