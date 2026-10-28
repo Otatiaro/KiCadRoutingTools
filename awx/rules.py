@@ -132,6 +132,9 @@ DEBT THIS FILE DOES NOT PAY (recorded, not fixed)
 """
 
 KRT_TOOL = {'scope': [], 'kind': 'utility'}   # #937: a research tool (awx), catalogued, shown at no door
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import math
 import os
 import awx_settings

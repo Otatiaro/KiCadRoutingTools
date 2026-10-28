@@ -22,6 +22,9 @@ Protocol (JSON lines on stdin / stdout; one reply per request):
 A reply is {"ok": true, ...} or {"ok": false, "error": "..."}; the
 worker's own stderr goes where the parent points it.
 """
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import contextlib
 import io
 import json

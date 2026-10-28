@@ -38,6 +38,9 @@ telemetry answers that, and this repo collects none.
 """
 KRT_TOOL = {'scope': [], 'kind': 'instrument'}
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import argparse
 import json
 import os

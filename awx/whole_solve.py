@@ -28,6 +28,9 @@ which never ends with nothing): the best plan found is written marked 'proved': 
 two vias ('over_nets'), and never as a floor for a later solve. Under SOLVE_CROWD=1 (that solve too) a model with NO
 plan is solved again as its CROWD diagnosis, and the lanes whose crossings the ends leave no room for are written to
 OUT.crowded.json (solve(crowd=True))."""
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import sys, os, re, itertools, collections, json, math, hashlib, time
 import awx_settings
 import whole_ctx

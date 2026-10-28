@@ -9,6 +9,9 @@ The two boards must share one frame -- the zynq article's human is the original 
 """
 KRT_TOOL = {'scope': [], 'kind': 'actor'}   # a research tool (awx), catalogued, shown at no door
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import argparse
 import math
 import os

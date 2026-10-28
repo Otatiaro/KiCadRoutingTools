@@ -44,6 +44,9 @@ Exit 0 written (the output always exists); 2 for an argparse usage error, a `--l
 a copper layer of the board, or a `--ref` the board does not have; 1 for a
 malformed `--polygon` (a point that is not X,Y, or fewer than 3 points).
 """
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import argparse
 import os
 import re

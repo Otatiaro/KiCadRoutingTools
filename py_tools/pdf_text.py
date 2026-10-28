@@ -35,6 +35,9 @@ Exit codes: 0 done (including a `--find` with no match, which says so),
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'utility'}
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import argparse
 import json
 import os

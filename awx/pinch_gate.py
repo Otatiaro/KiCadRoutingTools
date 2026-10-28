@@ -29,6 +29,9 @@ Usage: pinch_gate.py [--roots tmp,tmp/s7,tmp/s8,tmp/s9,tmp/s10] [--ks 28,35,41,5
 """
 
 KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import argparse
 import contextlib
 import glob
