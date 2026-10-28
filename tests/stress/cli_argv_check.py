@@ -27,6 +27,8 @@ of the main.
 
 `parsed_args(argv)` hands back the parsed namespace itself, through the
 same child: lineage_scope.py reads what each step SCOPES that way.
+`long_form(argv)` respells each short option as its long one from the same
+parser, for readers keyed by long spellings (manifest_to_plan, #1460).
 
 The parser is TODAY'S. A command recorded under an older commit that used a
 flag removed since then reads as rejected here; that is what a replay of it
@@ -36,6 +38,7 @@ corpus no KEPT command is refused either way: the guard is for the shape.)
 import atexit
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -111,6 +114,18 @@ sys.path.insert(0, here)
 import cli_argv_check
 for line in sys.stdin:
     req = json.loads(line)
+    if req.get('options'):
+        # option_spellings(): each short option -> [its action's first long
+        # option, whether it takes a value].
+        table = {}
+        for act in p._actions:
+            longs = [o for o in act.option_strings if o.startswith('--')]
+            for o in act.option_strings:
+                if longs and not o.startswith('--'):
+                    table[o] = [longs[0], act.nargs != 0]
+        out.write('##R ' + json.dumps({'ok': True, 'options': table}) + '\n')
+        out.flush()
+        continue
     args, cwd = req['args'], req.get('cwd')
     err = io.StringIO()
     try:
@@ -546,6 +561,83 @@ def _ask(tool, args, cwd, want_ns=False):
         if line.startswith('##R '):
             return json.loads(line[4:])
     return None
+
+
+_spellings = {}
+
+
+def option_spellings(tool):
+    """{short option: (long option, takes a value)} from `tool`'s real parser,
+    e.g. qfn_fanout's '-c' -> ('--component', True); {} when its parser cannot
+    be built here."""
+    if tool not in _spellings:
+        proc = _child(tool)
+        table = {}
+        if proc is not None:
+            proc.stdin.write(json.dumps({'options': True}) + '\n')
+            proc.stdin.flush()
+            for line in proc.stdout:
+                if line.startswith('##R '):
+                    table = {k: tuple(v) for k, v in
+                             json.loads(line[4:]).get('options', {}).items()}
+                    break
+        _spellings[tool] = table
+    return _spellings[tool]
+
+
+#: argparse's own test for a negative number, which it reads as a value.
+_NEGATIVE_NUMBER = re.compile(r'^-\d+$|^-\d*\.\d+$')
+
+
+def _respell(a, table):
+    """The long spelling of one argument the way argparse reads it: `-c`,
+    `-c=U2` and `-cU2` are `--component U2`, `-Ov` is two switches. Anything
+    else -- a long option, a value, a negative number, a net name such as
+    '-BATT' whose first letter is no short option of the tool -- as written."""
+    if a.startswith('--') or not a.startswith('-') or len(a) < 2 \
+            or _NEGATIVE_NUMBER.match(a):
+        return [a]
+    if a in table:
+        return [table[a][0]]
+    opt, eq, val = a.partition('=')
+    if eq and opt in table:
+        return [table[opt][0]] + ([val] if table[opt][1] else [])
+    words, rest = [], a[1:]
+    while rest:
+        opt = '-' + rest[0]
+        if opt not in table:
+            return [a]
+        name, takes_value = table[opt]
+        words.append(name)
+        rest = rest[1:]
+        if takes_value:
+            if rest:
+                words.append(rest)
+            break
+    return words
+
+
+def long_form(argv):
+    """The recorded command with every short option respelled as its long
+    option, by the tool's own parser (#1460). Readers of a command line that
+    match long spellings -- manifest_to_plan, the parity gate -- otherwise
+    lose a short option with its value, or take it into the list before it:
+    a recorded `qfn_fanout.py ... -c U2` converted to a fanout step with no
+    component. Unchanged when the tool is not one this module checks or its
+    parser cannot be built here; nothing after a bare '--' is touched."""
+    found = tool_args(argv)
+    if found is None:
+        return list(argv)
+    tool, args = found
+    table = option_spellings(tool)
+    if not table:
+        return list(argv)
+    out = list(argv[:len(argv) - len(args)])
+    for k, a in enumerate(args):
+        if a == '--':
+            return out + args[k:]
+        out += _respell(a, table)
+    return out
 
 
 def parsed_args(argv, cwd=None):

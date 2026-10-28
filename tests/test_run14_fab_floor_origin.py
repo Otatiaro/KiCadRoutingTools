@@ -215,19 +215,20 @@ class MidRunWriterSeedsOriginTest(unittest.TestCase):
             'the mid-run pass lowered a fab floor without recording the '
             'board ORIGINAL, so the writeback will baseline on its own output')
 
-    def test_the_relaxation_is_still_disclosed_after_the_mid_run_pass(self):
-        """End to end: mid-run pass, then the writeback. The banner must name
-        the board's 0.25, which is the half that went silent."""
+    def test_the_declared_floor_survives_both_writers(self):
+        """End to end: mid-run pass, then the writeback. Neither writes the
+        board's declared copper-to-hole 0.25 down (it used to reach 0.127
+        here, then needed this banner to be noticed at all), so the shipped
+        project carries 0.25 and no relaxation of it is announced."""
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             F.apply_routed_floors(self.pcb, clearance=0.127, verbose=False)
             F.fix_project_for_output(self.pcb, clearance=0.127, verbose=True)
         out = buf.getvalue()
-        self.assertIn('FAB FLOOR RELAXED', out,
-                      'a real 0.25 -> 0.127 relaxation shipped with no banner')
-        self.assertIn('ORIGINAL 0.25', out,
-                      'the banner must baseline on the board 0.25, not on the '
-                      'value the mid-run pass had already written')
+        with open(os.path.join(self.tmp, 'm.kicad_pro')) as f:
+            rules = json.load(f)['board']['design_settings']['rules']
+        self.assertEqual(rules.get('min_hole_clearance'), 0.25)
+        self.assertNotIn('copper-to-hole clearance: 0.25 ->', out)
 
     def test_a_second_mid_run_pass_does_not_re_seed(self):
         """Once recorded, the origin is the board's, not each pass's input."""

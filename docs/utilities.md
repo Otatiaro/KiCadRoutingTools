@@ -2192,6 +2192,96 @@ still replay.
 Exit 0 written (unresolved caps are reported, not failed); 2 unreadable input,
 or two intent blocks declaring one part at different angles.
 
+## Deterministic Plan Router (`autoplan.py`)
+
+Routes a board through a chain built from the board itself -- footprints,
+net names, layer count and the board's own design rules -- without an agent.
+It makes the same kinds of choices the plan-pcb-routing skill asks an agent
+to make, and runs each step as its own process in `<output>.autoplan/`:
+
+1. **Design rules**: the board's Default class clearance as the
+   `--clearance-ceiling`, the fab track floor, the working via, and the fine
+   via for fine-pitch escapes (`list_nets.read_design_rules`).
+2. **Planes first**: GND and the dominant rail on the first two inner layers
+   on 4+ layer boards, GND on B.Cu on 2-layer boards.
+3. **Fanout**: the part's shape is read from its pads, in its own frame,
+   exposed pads and markers (net-less pads unlike the part's commonest pad,
+   such as a BGA's corner outline pads) set aside. A grid array (at least three rows and three
+   columns of three or more pads, each axis on a regular lattice, the two
+   pitches within 2x of each other, with interior pads) gets `bga_fanout.py` when it is more than two
+   rows deep or at 0.5 mm or finer; a four-sided perimeter package gets
+   `qfn_fanout.py` at 0.5 mm or finer, or above 40 pads at 0.8 mm or finer.
+   The pitch is measured along a pad row (each axis of a grid separately; the
+   finer one counts). A two-row part (DFN, a connector), a part whose pads
+   form neither shape, a through-hole part other than a PGA, and any
+   connector, socket, header or magnetics by footprint name
+   (`autoplan.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
+   A part that drops escapes is retried at the fab clearance with the fine
+   via, then with the dogbone (BGA) or under-pad (QFN) method, keeping the
+   attempt that escaped most.
+4. **Decaps**: `place_fanout_clearance.py` once, after the fanouts.
+5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`.
+6. **Route**: `route.py` over every net, with the poured nets and rails as
+   power nets, layer costs that keep signals off the planes, a finer grid
+   around fine-pitch parts and deeper rip-up on congested boards; then up to
+   two further passes on the result.
+
+A step that fails is skipped and the chain continues from the last good board.
+
+Each route pass is graded: open nets are the nets `check_connected` reports
+unrouted or broken (its KiCad cross-check off, so the same board always grades
+the same), and DRC is `check_drc`'s real violations at the board's recorded
+floors. A pass is kept only if it is no worse than the best board so far on
+both and better on one; the first pass that is not kept ends the passes, and
+a tie keeps the earlier board.
+
+### Usage
+
+```bash
+python3 py_router/autoplan.py input.kicad_pcb output.kicad_pcb [OPTIONS]
+
+Options:
+  --dry-run          Print the analysis (AUTOPLAN_ANALYSIS) and exit
+  --finish           Run step 6 alone on a board another chain has already
+                     prepared and routed: the planes are read from the board's
+                     pours (not its teardrops), and the input board is graded
+                     first and ships unless a pass beats it. route.py works on
+                     the nets still open, but like any route step it may rip
+                     and reroute existing copper and runs its plane finalize
+  --effort-factor F  A route pass after the first starts only while the router
+                     iterations spent, plus the last pass's again, stay within
+                     F times the first pass's (default 2; a finite number >= 0).
+                     A forecast, not a cap: a pass that starts runs to its
+                     end. Iterations are the JSON_SUMMARY total_iterations the
+                     router reproduces exactly, so the same board always gets
+                     the same passes; a pass that reports none starts no other.
+```
+
+The chain, each step's arguments, return code, iterations and grade are
+written to `<output>.autoplan/plan.json`; the last line is `AUTOPLAN_SUMMARY`
+with the final step and its open and DRC counts. If no route pass succeeds,
+the best board the chain has ships (with `--finish`, the input board itself),
+replacing the output and its whole sibling set. The input may be a board
+inside `<output>.autoplan/` from an earlier run: it is staged before that
+directory is cleared.
+
+Net names reach every tool as patterns that select that net alone through the
+tools' own selectors, which also match a pattern's last sheet component and
+read a leading `!` as an exclusion: `GND` is passed as `GN[D/]`, `-BATT` as
+`[--]BAT[T/]`, `!RESET` as `[ -!]RESE[T/]`, and a sheet-qualified name as
+written. Each pattern is checked against the board's nets; a net no pattern
+isolates is left out of the power, exclusion and pair lists, and named.
+
+### Example
+
+```bash
+# Route an unrouted board end to end, no agent
+python3 py_router/autoplan.py board.kicad_pcb board_routed.kicad_pcb
+
+# Close what an agent's chain left open, as its last step
+python3 py_router/autoplan.py step9_route.kicad_pcb board_finished.kicad_pcb --finish
+```
+
 ## Build Script (`build_router.py`)
 
 Builds the Rust router module.

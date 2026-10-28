@@ -143,8 +143,9 @@ def test_the_cap_stops_at_the_rule_floor():
         check('board_default_netclass_clearance now reads 0.15',
               near(list_nets.board_default_netclass_clearance(pcb), ROUTED),
               list_nets.board_default_netclass_clearance(pcb))
-        check('min_hole_clearance keeps the routed value (never capped)',
-              near(rules.get('min_hole_clearance'), ROUTED),
+        check('min_hole_clearance keeps the declared 0.25 (never capped, '
+              'never lowered)',
+              near(rules.get('min_hole_clearance'), 0.25),
               rules.get('min_hole_clearance'))
         # The writeback may only ADD rule names. A project legitimately
         # carries rules this tool never writes (microvia_*), so compare the

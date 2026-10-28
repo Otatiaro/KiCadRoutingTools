@@ -38,6 +38,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tests" / "stress"))
 import manifest_to_plan as m2p  # noqa: E402
+from cli_argv_check import long_form  # noqa: E402
 from redo_stress_test import (  # noqa: E402
     parse_manifest, is_check_cmd)
 
@@ -201,7 +202,10 @@ def _plan_pairs(manifest):
                     step['assignments'] = [dict(a) for a in prev['assignments']]
                     break
         steps.append(step)
-        pairs.append((argv, step, base))
+        # #1460: graded in its LONG spelling, by the tool's own parser -- every
+        # table here is keyed by long options, so a recorded `-c U2` was
+        # checked by nothing and its loss reported no mismatch.
+        pairs.append((long_form(argv), step, base))
     return pairs
 
 
@@ -442,6 +446,31 @@ def check_pair(argv, step, base=None):
             if not named and step.get('nets'):
                 bad.append(('--component', f"a component-only step must carry "
                                            f"nets [], got {step.get('nets')}"))
+
+    # #1460: a fanout step's component and nets. The plan loader drops a
+    # fanout with no component, and the nets are the last --nets list exactly
+    # (no option or value taken into it), else every net.
+    if step.get('action') == 'fanout':
+        want_ref = None
+        want_nets = None
+        for i, a in enumerate(argv):
+            if a == '--component' and i + 1 < len(argv):
+                want_ref = argv[i + 1]
+            elif a == '--nets':
+                want_nets = []
+                for b in argv[i + 1:]:
+                    if b.startswith('--'):
+                        break
+                    want_nets.append(b)
+        n += 1
+        if step.get('component') != want_ref:
+            bad.append(('--component', f"want {want_ref!r} got "
+                                       f"{step.get('component')!r}"))
+        want_nets = [str(_num(x)) for x in (want_nets or ['*'])]
+        got_nets = [str(_num(x)) for x in (step.get('nets') or [])]
+        n += 1
+        if got_nets != want_nets:
+            bad.append(('--nets', f"want {want_nets} got {got_nets}"))
 
     # --plane-layers must survive as the assignment layers
     pl = _plane_layers(argv)
@@ -1541,6 +1570,64 @@ def check_group_flags():
     return bad
 
 
+#: #1460: recorded short spellings, each beside its long one. The first three
+#: are the issue's rows (the third once took '-c U2 -w 0.15' into --nets).
+SHORT_OPTION_CASES = (
+    ('qfn_fanout.py', ['-o', 'out.kicad_pcb', '-c', 'U2', '-w', '0.15', '--nets', '*'],
+     ['--output', 'out.kicad_pcb', '--component', 'U2', '--width', '0.15', '--nets', '*']),
+    ('qfn_fanout.py', ['-o', 'out.kicad_pcb', '--nets', '*', '-c', 'U2', '-w', '0.15'],
+     ['--output', 'out.kicad_pcb', '--nets', '*', '--component', 'U2', '--width', '0.15']),
+    ('qfn_fanout.py', ['-oout.kicad_pcb', '-cU2', '-w=0.15', '-n', '*', '!GND'],
+     ['--output', 'out.kicad_pcb', '--component', 'U2', '--width', '0.15',
+      '--nets', '*', '!GND']),
+    ('bga_fanout.py', ['-o', 'out.kicad_pcb', '-c', 'U1', '-w', '0.1', '-l', 'F.Cu', 'In1.Cu'],
+     ['--output', 'out.kicad_pcb', '--component', 'U1', '--track-width', '0.1',
+      '--layers', 'F.Cu', 'In1.Cu']),
+    ('route.py', ['out.kicad_pcb', '-n', 'X', '-BATT', '-C', 'U3', '-l', 'F.Cu', 'B.Cu'],
+     ['out.kicad_pcb', '--nets', 'X', '-BATT', '--component', 'U3',
+      '--layers', 'F.Cu', 'B.Cu']),
+    ('route_planes.py', ['out.kicad_pcb', '-n', 'GND', '-p', 'B.Cu'],
+     ['out.kicad_pcb', '--nets', 'GND', '--plane-layers', 'B.Cu']),
+)
+
+
+def check_short_options():
+    """#1460: a short option converts the same as its long spelling.
+
+    The converter's tables are keyed by long options, so a recorded
+    `qfn_fanout.py ... -c U2 -w 0.15` became a fanout step with no component
+    (which the plan loader then drops) and no width, while the converter
+    reported the step written and this gate reported no mismatch. Each case
+    must convert to the step its long spelling does and pass check_pair; the
+    negative control converts the short spellings WITHOUT the respelling and
+    must be reported. Returns (bad, control_caught)."""
+    bad = []
+    for tool, short, long_ in SHORT_OPTION_CASES:
+        head = ['python3', tool, 'in.kicad_pcb']
+        got, want = m2p.parse_command(head + short), m2p.parse_command(head + long_)
+        if got != want:
+            bad.append((f"{tool} {' '.join(short)}",
+                        f"converts to {got!r}, its long spelling to {want!r}"))
+            continue
+        n, why = check_pair(long_form(head + short), got)
+        if not n or why:
+            bad.append((f"{tool} {' '.join(short)}",
+                        f"check_pair: {why or 'checked nothing'}"))
+    real = m2p._long_form
+    m2p._long_form = list
+    try:
+        caught = all(check_pair(long_form(['python3', tool, 'in.kicad_pcb'] + short),
+                                m2p.parse_command(['python3', tool, 'in.kicad_pcb']
+                                                  + short))[1]
+                     for tool, short, _ in SHORT_OPTION_CASES[:2])
+    finally:
+        m2p._long_form = real
+    if not caught:
+        bad.append(('negative control', "a fanout converted without the "
+                                        "respelling was NOT reported"))
+    return bad, caught
+
+
 def check_rejected_steps():
     """A recorded command its tool REFUSES -- at argparse, or in a check its
     main makes after parsing -- ran nothing on the CLI, so it must not become a
@@ -2128,6 +2215,14 @@ def main():
     for f, why in reg_bad:
         print(f"    {f}: {why}")
 
+    short_bad, short_caught = check_short_options()
+    print(f"Short options: {'OK' if not short_bad else 'FAILED'} "
+          f"({len(SHORT_OPTION_CASES)} recorded short spellings convert as "
+          f"their long ones; negative control: without the respelling "
+          f"{'reported' if short_caught else 'MISSED'}).")
+    for f, why in short_bad:
+        print(f"    {f}: {why}")
+
     rej_bad = check_rejected_steps()
     print(f"Refused commands: {'OK' if not rej_bad else 'FAILED'} "
           f"(at argparse or after it: never plan steps; the board binds to "
@@ -2144,7 +2239,8 @@ def main():
         print(f"    {f}: {why}")
 
     return 1 if (total_bad or res_bad or cap_bad or own_bad or flag_bad
-                 or grp_bad or ref_bad or reg_bad or rej_bad or inv_bad) else 0
+                 or grp_bad or ref_bad or reg_bad or short_bad or rej_bad
+                 or inv_bad) else 0
 
 
 if __name__ == "__main__":

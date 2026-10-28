@@ -1082,7 +1082,10 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
 
 def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                     config: GridRouteConfig, exclude_net_id: int):
-    """Block via placement near existing drill holes."""
+    """Block via placement near existing drill holes: the hole-to-hole DRILL
+    minimum around every drill, and the via COPPER arms around no-copper
+    holes (the board's copper-to-hole floor, NPTH pad overrides)."""
+    _add_npth_via_copper_floors(obstacles, pcb_data, config, exclude_net_id)
     if config.hole_to_hole_clearance <= 0:
         return
 
@@ -1111,6 +1114,41 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # so a stitching via cannot land a sub-cell inside the minimum (issue #70).
     block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
                                 config.hole_to_hole_clearance, config.grid_step)
+
+
+def _add_npth_via_copper_floors(obstacles: GridObstacleMap, pcb_data: PCBData,
+                                config: GridRouteConfig, exclude_net_id: int):
+    """Hold a placed via's COPPER off every no-copper hole at the board's
+    copper-to-hole floor (#1038) and at an NPTH pad's clearance override
+    (#505) -- the arms the signal map (`add_drill_hole_obstacles`) and the
+    plane connector map (`plane_region_connector.build_base_obstacles`) lay
+    through the same helper. Without them this map, which places every
+    plane-tap and stitching via, held a via only by its drill (hole-to-hole)
+    and by the hole's mask-sized pad at copper clearance, so a tap via's
+    copper could sit under the declared floor: a GND tap 0.182 mm from a
+    connector's NPTH locating hole against a declared 0.2.
+
+    The population is the plane connector's: every NPTH hole of every net (a
+    drill does not care whose net it nominally is), plus #441's plated holes
+    whose ring does not cover the drill, when foreign to the tapped net.
+    Pad holes only, which no tap adds or rips, so the incremental via-map
+    mirror has nothing to add or remove for them."""
+    from kicad_parser import pad_drill_circles
+    from obstacle_map import resolve_hole_clearance, block_via_cells_near_npth_floors
+    npth = []
+    for net_id, pads in pcb_data.pads_by_net.items():
+        for pad in pads:
+            if pad.drill <= 0:
+                continue
+            if not _pad_has_copper(pad):
+                npth.extend(pad_drill_circles(pad))
+            elif (max(pad.size_x, pad.size_y) < pad.drill
+                  and net_id != exclude_net_id):
+                npth.extend(pad_drill_circles(pad))
+    block_via_cells_near_npth_floors(
+        obstacles, pcb_data, npth, config.via_size, config.via_drill,
+        config.clearance, config.hole_to_hole_clearance,
+        resolve_hole_clearance(pcb_data, config), config.grid_step)
 
 
 def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,

@@ -109,9 +109,11 @@ def decision():
     tg = compute_targets(clearance=0.15, copper_holes=False)
     check('compute_targets(copper_holes=False) writes no copper-to-hole floor',
           'min_hole_clearance' not in tg and tg.get('min_clearance') == 0.15, str(tg))
+    from fix_kicad_drc_settings import UNDECLARED_HOLE_CLEARANCE
     tg = compute_targets(clearance=0.15)
-    check('the default still follows the clearance',
-          tg.get('min_hole_clearance') == 0.15, str(tg))
+    check('the default still follows the clearance (where none is declared)',
+          tg.get(UNDECLARED_HOLE_CLEARANCE) == 0.15
+          and 'min_hole_clearance' not in tg, str(tg))
 
 
 def counting(tmp):
