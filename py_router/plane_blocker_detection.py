@@ -113,12 +113,34 @@ def find_route_blocker_from_frontier(
     Returns:
         Net ID of the top non-protected blocker, or None if no blocker found
     """
+    counts = frontier_block_counts(blocked_cells, pcb_data, config,
+                                   exclude_net_id)
+    return top_frontier_blocker(counts, pcb_data, protected_net_ids or set())
+
+
+def frontier_block_counts(
+    blocked_cells: List[Tuple[int, int, int]],
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    exclude_net_id: int,
+) -> Dict[int, int]:
+    """{net_id: frontier cells its copper accounts for}, the tally
+    find_route_blocker_from_frontier ranks, in first-seen order (segments,
+    then vias). It does not depend on the protected set, so a caller naming
+    several blockers in turn computes it once (see top_frontier_blocker).
+
+    A segment counts, for every grid point of its Bresenham walk, the layer-0
+    frontier cells in the (2e+1)-square around that point; a via counts the
+    layer-0 frontier cells inside its keep-out disc. The squares are read off
+    a 2D prefix sum over the frontier's bbox rather than probed cell by cell,
+    which is the same integer at (2e+1)^2 fewer operations per point.
+    """
     if not blocked_cells:
-        return None
+        return {}
+
+    import numpy as np
 
     coord = GridCoord(config.grid_step)
-    blocked_set = set(blocked_cells)
-    protected = protected_net_ids or set()
 
     # Frontier bbox prefilter (#225): every membership test below is on layer 0,
     # so only layer-0 frontier cells can ever match, and a segment/via contributes
@@ -128,14 +150,29 @@ def find_route_blocker_from_frontier(
     # daisho. Skipping copper whose expanded bbox can't reach the frontier is an
     # exact necessary-condition cull -- the counts (and the chosen blocker) are
     # unchanged. No layer-0 frontier cell -> nothing can match (was: empty tally).
-    _l0x = [gx for (gx, gy, l) in blocked_set if l == 0]
-    if not _l0x:
-        return None
-    _l0y = [gy for (gx, gy, l) in blocked_set if l == 0]
-    bb_min_x, bb_max_x = min(_l0x), max(_l0x)
-    bb_min_y, bb_max_y = min(_l0y), max(_l0y)
+    l0 = {(gx, gy) for (gx, gy, l) in blocked_cells if l == 0}
+    if not l0:
+        return {}
+    cells = np.array(list(l0), dtype=np.int64)
+    bb_min_x, bb_min_y = (int(v) for v in cells.min(axis=0))
+    bb_max_x, bb_max_y = (int(v) for v in cells.max(axis=0))
+    nx, ny = bb_max_x - bb_min_x + 1, bb_max_y - bb_min_y + 1
+    occ = np.zeros((nx, ny), dtype=np.int32)
+    occ[cells[:, 0] - bb_min_x, cells[:, 1] - bb_min_y] = 1
+    # psum[i, j] = frontier cells at local x < i and y < j
+    psum = np.zeros((nx + 1, ny + 1), dtype=np.int64)
+    psum[1:, 1:] = occ.cumsum(axis=0).cumsum(axis=1)
 
-    # Count how many blocked cells each net is responsible for (including protected)
+    def square_count(gxs, gys, e):
+        # Frontier cells in the (2e+1)-squares centred on (gxs, gys), summed;
+        # clipping to the bbox drops only cells that cannot be frontier.
+        xa = np.clip(gxs - e - bb_min_x, 0, nx)
+        xb = np.clip(gxs + e + 1 - bb_min_x, 0, nx)
+        ya = np.clip(gys - e - bb_min_y, 0, ny)
+        yb = np.clip(gys + e + 1 - bb_min_y, 0, ny)
+        return int((psum[xb, yb] - psum[xa, yb] - psum[xb, ya]
+                    + psum[xa, ya]).sum())
+
     net_block_count: Dict[int, int] = {}
 
     # Check segments
@@ -143,20 +180,17 @@ def find_route_blocker_from_frontier(
     # existing-track half from the segment's ACTUAL width (a wide/diff-pair trace
     # is responsible for more blocked cells than the default width implies), so
     # the rip-up heuristic attributes blockage to the right net. Mirrors #172.
+    # Every segment is tallied on layer 0, whatever its own layer.
     routing_half = config.track_width / 2
 
     for seg in pcb_data.segments:
         if seg.net_id == exclude_net_id:
             continue
 
-        # Get layer index (assume single layer routing, layer 0)
-        layer_idx = 0
-
         seg_half = (seg.width if getattr(seg, 'width', 0) and seg.width > 0
                     else config.track_width) / 2
         expansion_grid = max(1, coord.to_grid_dist(seg_half + config.clearance + routing_half))
 
-        # Trace along segment and check for blocked cells
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
         gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
@@ -167,20 +201,15 @@ def find_route_blocker_from_frontier(
                 min(gy1, gy2) - expansion_grid > bb_max_y):
             continue
 
-        count = 0
-        for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-            # Check expansion around this point
-            for ex in range(-expansion_grid, expansion_grid + 1):
-                for ey in range(-expansion_grid, expansion_grid + 1):
-                    cell = (gx + ex, gy + ey, layer_idx)
-                    if cell in blocked_set:
-                        count += 1
+        walk = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int64)
+        count = square_count(walk[:, 0], walk[:, 1], expansion_grid)
 
         if count > 0:
             net_block_count[seg.net_id] = net_block_count.get(seg.net_id, 0) + count
 
     # Check vias - size the keep-out from each via's ACTUAL size (a fanout
     # via-in-pad is larger than config.via_size), same rationale as the segments.
+    discs = {}
     for via in pcb_data.vias:
         if via.net_id == exclude_net_id:
             continue
@@ -194,18 +223,31 @@ def find_route_blocker_from_frontier(
         if (gx + via_expansion_grid < bb_min_x or gx - via_expansion_grid > bb_max_x or
                 gy + via_expansion_grid < bb_min_y or gy - via_expansion_grid > bb_max_y):
             continue
-        count = 0
-        for ex in range(-via_expansion_grid, via_expansion_grid + 1):
-            for ey in range(-via_expansion_grid, via_expansion_grid + 1):
-                if ex * ex + ey * ey <= via_expansion_grid * via_expansion_grid:
-                    # Vias block all layers, but for single-layer routing check layer 0
-                    cell = (gx + ex, gy + ey, 0)
-                    if cell in blocked_set:
-                        count += 1
+        disc = discs.get(via_expansion_grid)
+        if disc is None:
+            e = via_expansion_grid
+            ex, ey = np.mgrid[-e:e + 1, -e:e + 1]
+            inside = ex * ex + ey * ey <= e * e
+            disc = discs[e] = (ex[inside], ey[inside])
+        px = disc[0] + (gx - bb_min_x)
+        py = disc[1] + (gy - bb_min_y)
+        keep = (px >= 0) & (px < nx) & (py >= 0) & (py < ny)
+        count = int(occ[px[keep], py[keep]].sum())
 
         if count > 0:
             net_block_count[via.net_id] = net_block_count.get(via.net_id, 0) + count
 
+    return net_block_count
+
+
+def top_frontier_blocker(
+    net_block_count: Dict[int, int],
+    pcb_data: PCBData,
+    protected: Set[int],
+) -> Optional[int]:
+    """The net find_route_blocker_from_frontier names from a
+    frontier_block_counts tally: the top non-protected count, the first seen
+    on a tie. A protected top blocker is reported, never returned."""
     if not net_block_count:
         return None
 
