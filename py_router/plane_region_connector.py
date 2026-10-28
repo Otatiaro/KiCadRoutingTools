@@ -1937,7 +1937,26 @@ def _calculate_clearance(
 from terminal_colors import GREEN, RED, YELLOW, RESET
 
 
-def _try_route_between_regions(
+def _try_route_between_regions(*args, base_obstacles: GridObstacleMap,
+                               config: GridRouteConfig, pcb_data=None,
+                               net_id: Optional[int] = None, **kwargs):
+    """`_route_between_regions` under the per-route stamps every other routing
+    entry takes (net_keepouts.stamp): the net-filtered keep-out areas and the
+    .kicad_dru net-pair / pad hole-clearance rules binding the plane's net are
+    blocked in the map for the search and removed after it. Without them a
+    region join ran through an isolation barrier the signal routes held."""
+    if pcb_data is None or net_id is None:
+        return _route_between_regions(*args, base_obstacles=base_obstacles,
+                                      config=config, pcb_data=pcb_data,
+                                      net_id=net_id, **kwargs)
+    from net_keepouts import stamp as _nk_stamp
+    with _nk_stamp(base_obstacles, pcb_data, (net_id,), config):
+        return _route_between_regions(*args, base_obstacles=base_obstacles,
+                                      config=config, pcb_data=pcb_data,
+                                      net_id=net_id, **kwargs)
+
+
+def _route_between_regions(
     anchors_i: List[Tuple[float, float]],
     anchors_j: List[Tuple[float, float]],
     base_obstacles: GridObstacleMap,
