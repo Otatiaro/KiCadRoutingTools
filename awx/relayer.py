@@ -10,6 +10,9 @@ copper on one layer -- a run moved onto the layer of the neck or pad it leaves (
   python3 relayer.py BOARD OUT NET:X,Y:FROM:TO ...      (a move: the net, its stub's end, the layer it is on, the one)
 
 Writes OUT with the board's siblings (its project, the fanout's plan sidecar) beside it."""
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import contextlib
 import io
 import json

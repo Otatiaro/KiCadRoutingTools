@@ -43,6 +43,9 @@ usage: replan.py TAG K [--board=BASE] [--dest=REF] [--rounds=4] [--worst=3]
          (+ .log, .pack.json, _refusals.json)
   writes tmp/OUT_rp_kK_r<N>_* per round, tmp/OUT_rp_kK.kicad_pcb (best)
 """
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import contextlib
 import hashlib
 import io

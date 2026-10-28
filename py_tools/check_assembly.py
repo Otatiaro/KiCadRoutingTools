@@ -45,6 +45,9 @@ an item the --baseline did not have (see IN A RULE AREA THAT FORBIDS IT,
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse

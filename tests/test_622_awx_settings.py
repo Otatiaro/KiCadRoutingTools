@@ -32,6 +32,9 @@ NOT_THE_ROUTE = {
     ('probe_memo', "    os.environ['PROBE_MEMO_DIR'] = d"),               # its own self-test
     ('whole_ends', "    os.environ.setdefault('PLAN_JUDGE', 'ends')"),     # its own __main__, a research CLI
 }
+# The OpenBLAS guard every command-line tool carries in its own `if __name__ == '__main__':` block, before
+# any import (tests/test_blas_single_thread.py holds it there): run as a script only, never by the whole route.
+BLAS_GUARD = "    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')"
 
 
 def check(ok, what):
@@ -94,6 +97,8 @@ def main():
                     and not (isinstance(n.value, ast.Name) and n.value.id == 'awx_settings'))
                    or (isinstance(n, ast.ImportFrom) and n.module == 'os'
                        and any(a.name in ('environ', 'getenv', 'putenv') for a in n.names)))
+            if hit and lines[n.lineno - 1] == BLAS_GUARD:
+                continue
             if hit and not any(m == km and lines[n.lineno - 1].startswith(kl) for km, kl in NOT_THE_ROUTE):
                 bad.append(f'{m}.py:{n.lineno}')
     check(not bad, 'every read goes through awx_settings' + ('' if not bad else ': ' + ', '.join(bad[:8])))

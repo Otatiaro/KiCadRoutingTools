@@ -41,6 +41,9 @@ usage: evolve.py TAG K --seeds=STEM[,STEM...] [--pop=4] [--gens=3]
             sidecar) whenever the best changes, tmp/TAG/evolve_k<K>.json.
 Run it under the chain's own env (PLAN_PAGES=1 PLAN_JUDGE=count ...).
 """
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import concurrent.futures
 import json
 import os

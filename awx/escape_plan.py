@@ -34,6 +34,9 @@ An INCREMENTAL round (INCREMENTAL= the previous round's sidecar, FEEDBACK= its f
 does not name at the move it was laid by; every tooth is free (no tooth stands on the base to hold)."""
 KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import collections
 import contextlib
 import json

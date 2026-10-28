@@ -24,6 +24,9 @@ Exit codes: 0 drawn, 2 an unreadable board, or a pattern no board's net matches.
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': ['placement', 'routing', 'combined'], 'kind': 'instrument'}
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse

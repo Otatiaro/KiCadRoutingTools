@@ -23,6 +23,9 @@ so on a checkout without a built router the 8 test files that import a routing
 module at module level took the entire ~200-test suite down with them.
 """
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import importlib
 import importlib.util
 import os

@@ -24,6 +24,9 @@ swapped layer, or no file is left behind.
 usage: mirror_board.py IN.kicad_pcb OUT.kicad_pcb
 """
 import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+import os
 import re
 import shutil
 import sys

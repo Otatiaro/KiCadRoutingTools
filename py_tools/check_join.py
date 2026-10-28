@@ -26,6 +26,9 @@ Exit 0 clean, 1 violations, 2 usage errors.
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': ['routing', 'combined'], 'kind': 'conditional'}
 
+import os
+if __name__ == '__main__':  # one OpenBLAS thread: tests/test_blas_single_thread.py
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 import argparse
 import json

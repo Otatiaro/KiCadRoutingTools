@@ -1759,9 +1759,13 @@ def refusal_sites(tool):
     rel, fn = _MAINS[tool]
     tree = ast.parse((REPO / rel).read_text(encoding='utf-8'))
     if fn is None:
+        # the `__main__` block that parses the CLI -- not the OpenBLAS guard
+        # every entry script opens with (tests/test_blas_single_thread.py)
         body = next(n for n in tree.body if isinstance(n, ast.If)
                     and isinstance(n.test, ast.Compare)
-                    and getattr(n.test.left, 'id', '') == '__name__')
+                    and getattr(n.test.left, 'id', '') == '__name__'
+                    and any(isinstance(c, ast.Attribute) and c.attr == 'parse_args'
+                            for c in ast.walk(n)))
     else:
         body = _function(tree, fn)
     parent = {c: p for p in ast.walk(body) for c in ast.iter_child_nodes(p)}
