@@ -2056,7 +2056,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     Net-filtered keep-outs binding this net are stamped for the
     duration of the route and removed afterwards (`net_keepouts.stamp`), and
     so are the flanks of its row pads, which it enters through their ends
-    (`pad_entry.stamp`)."""
+    (`pad_entry.stamp`; from a side only when no end is free, see
+    `_route_with_via_unblock`)."""
     from net_keepouts import stamp as _nk_stamp
     from pad_entry import stamp as _flank_stamp
     with _nk_stamp(obstacles, pcb_data, (net_id,), config), \
@@ -3117,7 +3118,9 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
                 max_search_radius=_radius, via_size=vd, via_drill=dr,
                 extra_vias=inflight_vias, extra_segments=inflight_segments,
                 try_default=False, fine_for_all=True,
-                distant_trace_radius=0.0, disable_reuse=True)
+                distant_trace_radius=0.0, disable_reuse=True,
+                # A rescue: the row-pad flanks stay open (pad_entry).
+                pad_entry=False)
             if tap_res.success and tap_res.via is not None:
                 # mm-exact re-check at FULL clearance vs CURRENT copper (#339): the
                 # tap's fine pass places at capped clearance, which approved a 0.45
@@ -3363,6 +3366,53 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
                             pcb_data, net_id, print_prefix="",
                             direction_labels=("forward", "backward"), single_direction=False,
                             waypoints=None, pending_vias=None, pad_sources=True):
+    """`_route_with_via_unblock_impl`, the net's row-pad flanks respected first.
+
+    With flanks on record for this net and map (`pad_entry.stamp`), the plain
+    search runs once with them: a route found there lands through the pads'
+    ends. Only when it fails are they lifted for the whole unblock ladder --
+    a plain search, then the rescues -- so a pad with no free end still
+    connects, from its side, as before the flanks existed, and the console
+    says so. The rescues never run with the flanks up: they cost far more
+    than the one walled search."""
+    from pad_entry import active, lifted
+    if active(obstacles, net_id) is None:
+        return _route_with_via_unblock_impl(
+            router, obstacles, config, sources, targets, track_margin, pcb_data,
+            net_id, print_prefix, direction_labels, single_direction, waypoints,
+            pending_vias, pad_sources)
+    first = _route_main_connection(router, obstacles, config, sources, targets, track_margin,
+                                   pcb_data, net_id, print_prefix, direction_labels,
+                                   single_direction, waypoints, pad_sources=pad_sources)
+    if first[0] is not None:
+        return first + ([], [])
+    # A search that never ran into a flank cell is the search the map without
+    # them gives (same cells, same costs): the ladder starts from its result
+    # instead of repeating it. Only when the frontier is complete (the
+    # tracker samples past 10000 cells) and the track has no extra margin
+    # (a wide track's margin cells are tested without being reported).
+    from pad_entry import touched
+    margins = track_margin if isinstance(track_margin, (list, tuple)) else [track_margin]
+    reuse = (not touched(obstacles, net_id, first[2], first[3])
+             and not any(m for m in margins if m))
+    with lifted(obstacles, net_id):
+        res = _route_with_via_unblock_impl(
+            router, obstacles, config, sources, targets, track_margin, pcb_data,
+            net_id, print_prefix, direction_labels, single_direction, waypoints,
+            pending_vias, pad_sources, first=first if reuse else None)
+    if res[0] is not None and not reuse:
+        print(f"{print_prefix}no way in through a row pad's ends, "
+              f"routed entering from a pad's side")
+    if reuse:
+        return res
+    return (res[0], res[1] + first[1]) + tuple(res[2:])
+
+
+def _route_with_via_unblock_impl(router, obstacles, config, sources, targets, track_margin,
+                                 pcb_data, net_id, print_prefix="",
+                                 direction_labels=("forward", "backward"), single_direction=False,
+                                 waypoints=None, pending_vias=None, pad_sources=True,
+                                 first=None):
     """_route_main_connection plus a via-in-pad unblock (issue #189), generic over
     single-ended, multipoint-main and tap routes.
 
@@ -3377,10 +3427,15 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     (a tap call's earlier edges). Each placement here is shown those AND the
     vias this call already placed, so it holds hole-to-hole off them (see
     _place_shrunk_via_in_pad_impl).
+
+    ``first``: a failed _route_main_connection result for this very search,
+    which the caller already ran on a map that answers it the same way; it
+    stands for the plain search here.
     """
-    res = _route_main_connection(router, obstacles, config, sources, targets, track_margin,
-                                 pcb_data, net_id, print_prefix, direction_labels,
-                                 single_direction, waypoints, pad_sources=pad_sources)
+    res = first if first is not None else _route_main_connection(
+        router, obstacles, config, sources, targets, track_margin,
+        pcb_data, net_id, print_prefix, direction_labels,
+        single_direction, waypoints, pad_sources=pad_sources)
     if res[0] is not None:
         return res + ([], [])
     layer_names = config.layers
@@ -5307,7 +5362,12 @@ def route_multipoint_taps(
     calls took the copy, each a reroute whose main route had run the #189
     via-in-pad unblock on the same map (an unblock via registered there and
     not committed to pcb_data was a free via no probe here could name;
-    _register_unblock_via registers none any more)."""
+    _register_unblock_via registers none any more).
+
+    The tap edges land through the ends of the net's row pads: the flanks are
+    stamped like the keep-outs, and a scoped copy carries them on record too
+    (`pad_entry.also_on`), so an edge that finds no way in through an end
+    lifts them (`_route_with_via_unblock`)."""
     ring_cells: list = []
     # Ledger-only (KICAD_OBSTACLE_LEDGER=1): checks the contract above on
     # whatever map this is, which the ref-count ledger cannot (it books only
@@ -5345,9 +5405,11 @@ def route_multipoint_taps(
             # #977 lift registry is keyed by map, so a copy taken first would
             # be lifted a second time.
             work = obstacles if free_vias is not None else obstacles.clone()
-            result = _route_multipoint_taps_impl(
-                pcb_data, net_id, config, work, main_result,
-                global_offset, global_total, global_failed, ring_cells, ring_rungs)
+            from pad_entry import also_on
+            with also_on(work, obstacles, net_id):
+                result = _route_multipoint_taps_impl(
+                    pcb_data, net_id, config, work, main_result,
+                    global_offset, global_total, global_failed, ring_cells, ring_rungs)
             return result
     finally:
         release_own_pad_lift(obstacles, net_id, _oplift)
@@ -5845,12 +5907,16 @@ def _route_multipoint_taps_impl(
                     _retry_cfg = replace(config, max_iterations=config.max_probe_iterations)
                     _tgts2 = list(targets) + [(_vgx, _vgy, li)
                                               for li in range(len(layer_names))]
+                    from pad_entry import lifted
                     try:
-                        (path, _it2, _fb2, _bb2, reversed_tap_path, _, _,
-                         necked_down, uniform_width) = _route_main_connection(
-                            router, obstacles, _retry_cfg, sources, _tgts2,
-                            track_margin, pcb_data, net_id, print_prefix="      ",
-                            pad_sources=False)
+                        # A rescue, like the unblock ladder: the row-pad
+                        # flanks are lifted for it (pad_entry).
+                        with lifted(obstacles, net_id):
+                            (path, _it2, _fb2, _bb2, reversed_tap_path, _, _,
+                             necked_down, uniform_width) = _route_main_connection(
+                                router, obstacles, _retry_cfg, sources, _tgts2,
+                                track_margin, pcb_data, net_id, print_prefix="      ",
+                                pad_sources=False)
                     finally:
                         # A kept via gets its lasting ring as this edge's
                         # in-progress via (_register_inprogress_via below).

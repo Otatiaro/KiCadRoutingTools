@@ -111,7 +111,9 @@ def kw(c, name):
     return next((k.value for k in c.keywords if k.arg == name), None)
 
 
-unb = calls(fns['_route_with_via_unblock'], '_place_shrunk_via_in_pad')
+# The ladder's body is _route_with_via_unblock_impl (the outer function only
+# tries the row-pad flanks first, pad_entry).
+unb = calls(fns['_route_with_via_unblock_impl'], '_place_shrunk_via_in_pad')
 check("_route_with_via_unblock: every placement is shown the vias it already "
       "placed", len(unb) >= 3 and all(
           kw(c, 'pending_vias') is not None
