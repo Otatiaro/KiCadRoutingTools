@@ -5593,7 +5593,6 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                              skip_net_ids=None,
                              dry_run: bool = False,
                              min_gain: float = 0.01,
-                             max_net_segs: int = 400,
                              max_chain_segs: int = 100):
     """Collapse grid-A* staircase micro-jogs into octolinear shortcuts (#536).
 
@@ -5624,7 +5623,10 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     grade it worse than the original. The guard runs WITHOUT pour credit:
     endpoints are preserved by construction, so the track/via/pad graph
     alone must not degrade -- raw zone-outline credit would mask a real
-    track loss behind fill the refill may not produce.
+    track loss behind fill the refill may not produce. It grades the net
+    once, with every chain shortened; a net that grades worse is replayed
+    with the guard after each chain, so only the offending chain reverts.
+    Every net is processed, whatever its size.
 
     POURS the moving copper carves are deliberately not consulted -- the
     same pour-blind convention routing follows; the plane finalize /
@@ -5637,7 +5639,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
     Returns (changed_count, nets_changed, original_segments_to_remove,
     added_segments, stats)."""
-    from collections import defaultdict
+    from collections import defaultdict, deque
     from check_connected import check_net_connectivity
     from geometry_utils import segment_to_segment_closest_points, segments_intersect
     from check_drc import point_to_pad_distance
@@ -5725,7 +5727,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     original_to_remove = []
     added_segments = []
     nets_changed = 0
-    stats = {'nets': 0, 'nets_skipped_large': 0, 'chains': 0, 'spans': 0,
+    stats = {'nets': 0, 'chains': 0, 'spans': 0,
              'segs_removed': 0, 'segs_added': 0, 'saved_mm': 0.0,
              'chains_reverted': 0}
 
@@ -5737,16 +5739,22 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     if hasattr(pcb_data, '_foreign_seg_arr_cache'):
         pcb_data._foreign_seg_arr_cache = None
     pcb_data._foreign_seg_arr_trust = True
+    # Connectivity is graded once per NET: every chain's shortcut is taken,
+    # then the net's combined result is checked against the original. Only
+    # when that grades worse is the net replayed with the check after every
+    # chain, which keeps each good chain and reverts the bad one. Grading
+    # after every chain cost (shortened chains x net size), which is why
+    # nets above 400 segments -- a board's power rails -- used to be skipped.
+    work = deque((nid, False) for nid in sorted(segs_by_net.keys()))
     try:
-        for net_id in sorted(segs_by_net.keys()):
+        while work:
+            net_id, guard_each = work.popleft()
             if net_id in skip_net_ids:
                 continue
             net_segs = segs_by_net[net_id]
             if len(net_segs) < 2:
                 continue
-            if len(net_segs) > max_net_segs:
-                stats['nets_skipped_large'] += 1
-                continue
+            net_stats0 = dict(stats)
             stats['nets'] += 1
             net_pads = pcb_data.pads_by_net.get(net_id, [])
             net_vias = vias_by_net.get(net_id, [])
@@ -5779,7 +5787,9 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                 groups[(s.layer, round(s.width, 4))].append(s)
 
             before = None
-            net_changed = False
+            net_segs0 = net_segs
+            net_trial = net_segs     # every proposal applied, dry run included
+            pending = []             # (removed_chain, new_chain_segs) to commit
             for (layer, w), gsegs in sorted(groups.items()):
                 if len(gsegs) < 2:
                     continue
@@ -6166,48 +6176,66 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                         # GNDA). Endpoints are preserved by construction, so
                         # requiring the track/via/pad graph alone not to degrade
                         # costs nothing on genuinely pour-served nets.
-                        if before is None:
-                            before = check_net_connectivity(net_id, net_segs, net_vias,
-                                                            net_pads, [],
-                                                            pcb_data=pcb_data)
                         _rm = {id(s) for s in removed_chain}
                         trial = [s for s in net_segs if id(s) not in _rm] + new_chain_segs
-                        if worse(before, check_net_connectivity(net_id, trial, net_vias,
+                        if guard_each:
+                            if before is None:
+                                before = check_net_connectivity(net_id, net_segs0, net_vias,
                                                                 net_pads, [],
-                                                                pcb_data=pcb_data)):
-                            stats['chains_reverted'] += 1
-                            continue
+                                                                pcb_data=pcb_data)
+                            if worse(before, check_net_connectivity(net_id, trial, net_vias,
+                                                                    net_pads, [],
+                                                                    pcb_data=pcb_data)):
+                                stats['chains_reverted'] += 1
+                                continue
 
                         stats['spans'] += len(spans)
                         stats['segs_removed'] += len(removed_chain)
                         stats['segs_added'] += len(new_chain_segs)
                         stats['saved_mm'] += gain
+                        net_trial = [s for s in net_trial if id(s) not in _rm] + new_chain_segs
                         if dry_run:
                             continue
-
-                        res = None
-                        for s in removed_chain:
-                            if id(s) in routed_seg_result:
-                                removed_ids.add(id(s))
-                                res = res or routed_seg_result[id(s)]
-                            else:
-                                original_to_remove.append(s)
-                        if res is None:
-                            res = {'new_segments': [], 'new_vias': [],
-                                   'cleanup': 'smooth_octolinear'}
-                            results.append(res)
-                        res['new_segments'] = list(res.get('new_segments') or []) + new_chain_segs
-                        added_segments.extend(new_chain_segs)
-                        # Splice pcb_data NOW, per commit (#508 finding 5): later
-                        # chains/nets must see this one's copper at its new place.
-                        pcb_data.segments = [s for s in pcb_data.segments
-                                             if id(s) not in _rm] + new_chain_segs
-                        if hasattr(pcb_data, '_foreign_seg_arr_cache'):
-                            pcb_data._foreign_seg_arr_cache = None
+                        pending.append((removed_chain, new_chain_segs))
                         net_segs = trial
-                        net_changed = True
-            if net_changed:
-                nets_changed += 1
+
+            # The net's one connectivity grade (see `work` above): a combined
+            # result that grades worse replays the net chain by chain.
+            if not guard_each and net_trial is not net_segs0:
+                before = check_net_connectivity(net_id, net_segs0, net_vias, net_pads, [],
+                                                pcb_data=pcb_data)
+                if worse(before, check_net_connectivity(net_id, net_trial, net_vias,
+                                                        net_pads, [], pcb_data=pcb_data)):
+                    stats.clear()
+                    stats.update(net_stats0)
+                    work.appendleft((net_id, True))
+                    continue
+            if not pending:
+                continue
+            _rm = set()
+            for removed_chain, new_chain_segs in pending:
+                res = None
+                for s in removed_chain:
+                    _rm.add(id(s))
+                    if id(s) in routed_seg_result:
+                        removed_ids.add(id(s))
+                        res = res or routed_seg_result[id(s)]
+                    else:
+                        original_to_remove.append(s)
+                if res is None:
+                    res = {'new_segments': [], 'new_vias': [],
+                           'cleanup': 'smooth_octolinear'}
+                    results.append(res)
+                res['new_segments'] = list(res.get('new_segments') or []) + new_chain_segs
+                added_segments.extend(new_chain_segs)
+            # Splice pcb_data once per net (#508 finding 5): later nets must see
+            # this one's copper at its new place. Within the net nothing reads
+            # it for the net's own copper -- the clearance queries are foreign.
+            pcb_data.segments = [s for s in pcb_data.segments
+                                 if id(s) not in _rm] + [s for _rc, ns in pending for s in ns]
+            if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+                pcb_data._foreign_seg_arr_cache = None
+            nets_changed += 1
     finally:
         pcb_data._foreign_seg_arr_trust = _trust_prev
         if hasattr(pcb_data, '_foreign_seg_arr_cache'):
