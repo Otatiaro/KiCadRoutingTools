@@ -5,7 +5,7 @@ The compiled half of KiCad Routing Tools: the Python extension module
 searches and obstacle map, the placer's per-move kernels, and the grid searches
 of the `awx/` whole-route bus router. The rest is Python that calls in here.
 
-**Current Version: 0.24.0** (the crate version in `Cargo.toml`)
+**Current Version: 0.24.1** (the crate version in `Cargo.toml`)
 
 > **Release note:** the newest published release is
 > [v0.23.7](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.23.7)
@@ -456,6 +456,16 @@ src/
 - **Placement kernels**: the trees and gap trees keep the Python's float expressions in order; the crossing and pad-hit kernels skip pairs whose boxes cannot meet; the congestion kernels sum a move's change over the cells it reaches, so their totals can differ from a whole-window Python sum in the last bits
 
 ## Version History
+
+### 0.24.1 (2026-10-28)
+- **Stub proximity stamped a disk at a time** (`obstacle_map.rs`,
+  `tiled.rs`): `add_stub_proximity_costs_batch` and `_grouped` compute
+  each falloff disk once per call, row by row, instead of a square root per
+  cell per stub, and stamp it with `CostGrid::raise_row` (one tile lookup
+  per tile a row crosses; a tile is created or copied only where a cell
+  rises). A group's field is a cost grid instead of a hash map. Same f32
+  expression, same integers: 2000 stubs of radius 40, 102 -> 18 ms (660 ms
+  on 0.23.7); grouped, 400 groups, 117 -> 70 ms (209 ms on 0.23.7).
 
 ### 0.24.0 (2026-10-28)
 - **Obstacle map in copy-on-write tiles** (`tiled.rs`, `obstacle_map.rs`):

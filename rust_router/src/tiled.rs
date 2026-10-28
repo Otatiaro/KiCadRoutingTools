@@ -378,6 +378,42 @@ impl CostGrid {
         *c = cost;
     }
 
+    /// `raise` over the run of cells (gx0 + i, gy), i in 0..costs.len(),
+    /// one tile lookup per tile the run crosses instead of two per cell. A
+    /// tile is created or copied only when some cell of it actually rises,
+    /// exactly as cell-by-cell `raise` would.
+    pub fn raise_row(&mut self, gx0: i32, gy: i32, p: usize, costs: &[i32]) {
+        let ty = gy >> TILE_SHIFT;
+        let mut i = 0usize;
+        while i < costs.len() {
+            let gx = gx0 + i as i32;
+            let tx = gx >> TILE_SHIFT;
+            let n = ((TILE_SIDE - (gx & TILE_MASK)) as usize).min(costs.len() - i);
+            let seg = &costs[i..i + n];
+            let rises = match self.dir.get(tx, ty, p) {
+                Some(t) => {
+                    let base = local(gx, gy);
+                    seg.iter().enumerate().any(|(k, &c)| c > 0 && c > t.v[base + k])
+                }
+                None => seg.iter().any(|&c| c > 0),
+            };
+            if rises {
+                let t = self.dir.get_or_create(tx, ty, p, || CostTile { v: [0; TILE_CELLS] });
+                let base = local(gx, gy);
+                for (k, &c) in seg.iter().enumerate() {
+                    let v = &mut t.v[base + k];
+                    if c > 0 && c > *v {
+                        if *v == 0 {
+                            self.len[p] += 1;
+                        }
+                        *v = c;
+                    }
+                }
+            }
+            i += n;
+        }
+    }
+
     /// Add `cost` to a cell.
     #[inline]
     pub fn add(&mut self, gx: i32, gy: i32, p: usize, cost: i32) {
@@ -396,6 +432,20 @@ impl CostGrid {
 
     pub fn clear(&mut self) {
         *self = Self::new(self.dir.planes);
+    }
+
+    /// Every nonzero cell of plane `p` with its cost.
+    pub fn for_each(&self, p: usize, mut f: impl FnMut(i32, i32, i32)) {
+        self.dir.for_each(|tx, ty, tp, t| {
+            if tp != p {
+                return;
+            }
+            for (i, &c) in t.v.iter().enumerate() {
+                if c != 0 {
+                    f((tx << TILE_SHIFT) + (i as i32 & TILE_MASK), (ty << TILE_SHIFT) + (i as i32 >> TILE_SHIFT), c);
+                }
+            }
+        });
     }
 
     pub fn count_tiles(&self, seen: &mut FxHashSet<usize>) -> (usize, usize) {
@@ -467,6 +517,40 @@ mod tests {
         let mut d = c.clone();
         d.dec(7, 50, 1);
         d.dec(7, 3, 0);
+        let mut seen = FxHashSet::default();
+        c.count_tiles(&mut seen);
+        assert_eq!(d.count_tiles(&mut seen).0, 0);
+    }
+
+    #[test]
+    fn raise_row_is_raise_per_cell() {
+        let mut a = CostGrid::new(2);
+        let mut b = CostGrid::new(2);
+        let mut s: u64 = 99;
+        for _ in 0..20_000 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let gx0 = ((s >> 33) % 400) as i32 - 200;
+            let gy = ((s >> 13) % 300) as i32 - 150;
+            let p = ((s >> 45) % 2) as usize;
+            let n = 1 + ((s >> 50) % 150) as usize;
+            let costs: Vec<i32> = (0..n).map(|k| ((s >> (k % 40)) % 9) as i32 - 2).collect();
+            a.raise_row(gx0, gy, p, &costs);
+            for (k, &c) in costs.iter().enumerate() {
+                b.raise(gx0 + k as i32, gy, p, c);
+            }
+        }
+        assert_eq!(a.total_len(), b.total_len());
+        for p in 0..2 {
+            for gx in -210..260 {
+                for gy in -150..150 {
+                    assert_eq!(a.get(gx, gy, p), b.get(gx, gy, p));
+                }
+            }
+        }
+        // a row that raises nothing copies no shared tile
+        let c = a.clone();
+        let mut d = c.clone();
+        d.raise_row(-200, 0, 0, &[0, -1, 0]);
         let mut seen = FxHashSet::default();
         c.count_tiles(&mut seen);
         assert_eq!(d.count_tiles(&mut seen).0, 0);
