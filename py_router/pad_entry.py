@@ -31,6 +31,13 @@ same with its whole parameter ladder (plane_pad_tap.tap_pad_with_escalation),
 and so does a KiCad-oracle link, started from the centre of the row pad it is
 anchored on (`seeds_to_pad_centres`, `walled_copy`; kicad_oracle).
 
+A differential pair's DIRECT HYBRID escape (diff_pair_routing) routes each
+terminal leg single-ended to its coupled middle: the leg is walled the same
+way, and lifted the same way when no end is free (_route_hybrid_leg). Its
+coupled middle launches clear of the pair's row pads and their flanks
+(`entry_rect`), beyond the ends: launched in the gap between the pair's
+own two pads, the middle would leave its legs no way in but a flank.
+
 A pad is a row pad when it is an SMD rectangle elongated along one axis
 (length >= 1.5 x width) with another pad of its footprint BESIDE it --
 across its long side, within one pad length. A two-pad passive's pads sit
@@ -135,6 +142,18 @@ def flank_rects(pad, config, track_width=None) -> List[tuple]:
         else:
             out.append((cx + lo, cy - reach, cx + hi, cy + reach))
     return out
+
+
+def entry_rect(pad, config) -> tuple:
+    """`pad` with its two flanks and the axial stub past each end, as one
+    board-frame rectangle (x0, y0, x1, y1): the region a track of its net
+    crosses only along the axis column."""
+    tw = config.track_width
+    hw, hl, along_x = _axis(pad)
+    outer = hw + tw / 2 + config.clearance
+    reach = hl + tw + config.clearance
+    ex, ey = (reach, outer) if along_x else (outer, reach)
+    return (pad.global_x - ex, pad.global_y - ey, pad.global_x + ex, pad.global_y + ey)
 
 
 def net_flank_rects(pcb_data, net_id: int, config, track_width=None) -> List[tuple]:
