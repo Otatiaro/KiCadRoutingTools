@@ -26,7 +26,8 @@ Categories:
                      GRAPHICS are not candidates (#337: immutable input art).
   redundant-cycle    same-net loop edges whose removal leaves connectivity
                      identical (pcb_modification._prune_net_cycles machinery,
-                     report-only; zoned nets skipped -- planes are meshes).
+                     report-only; on a zoned net, track loops only, no zone
+                     credit, a branch inside its own pour kept).
                      On a net the removal model grades, only edges that
                      removable-segment also reports.
   removable-segment  copper route.py's own cleanup would delete: a segment,
@@ -464,11 +465,13 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                 size=seg_len))
 
 
-def _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
-                  findings, removable=None):
+def _check_cycles(net_id, name, net_segs, net_vias, net_pads, net_zones,
+                  findings, removable=None, copper_layers=None):
     """Report-only spanning-tree reduction (prune_redundant_cycles machinery).
     _prune_net_cycles internally validates every proposed removal against
-    check_net_connectivity, so reported edges are guaranteed redundant.
+    check_net_connectivity, so reported edges are guaranteed redundant. A
+    zoned net is graded as the pruner grades it: track loops only, no zone
+    credit, a branch inside its own pour kept.
 
     ``removable`` (#1063) is the net's StrictRemovalModel answer when the
     removal pass grades this net: a loop edge is then reported only when that
@@ -477,14 +480,14 @@ def _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
     on. None -- a net the model does not grade (over the segment cap, fewer
     than two pads, or strictly split) -- keeps the verdict of
     prune_redundant_cycles, the pass that owns loops there."""
-    if has_zone:
-        return  # planes / pours are meshes, not trees (as the pruner)
     track_segs = [s for s in net_segs if not getattr(s, 'graphic', False)]
-    if len(track_segs) < 3:
+    if len(track_segs) < 2:
         return
     empty_fgrid = defaultdict(list)  # no grazing preference needed for a report
+    pours = [z for z in (net_zones or []) if not getattr(z, 'teardrop', False)]
     kept, removed = _prune_net_cycles(net_id, track_segs, net_vias, net_pads,
-                                      empty_fgrid, _CELL, 0.0, 0.1)
+                                      empty_fgrid, _CELL, 0.0, 0.1,
+                                      net_zones=pours, copper_layers=copper_layers)
     if removable is not None:
         keep = {id(net_segs[i]) for i in removable}
         removed = [s for s in removed if id(s) in keep]
@@ -496,14 +499,38 @@ def _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
         # copper no pass will ever take out.
         _k, removed = _restore_soft_joint_bridges(list(kept), list(removed),
                                                   net_vias, net_pads)
-    for s in removed:
+    # One finding per loop branch: the pruner removes a branch whole, so its
+    # segments (joined end to end) are one finding, named by its first edge.
+    par = list(range(len(removed)))
+
+    def _find(a):
+        while par[a] != a:
+            par[a] = par[par[a]]
+            a = par[a]
+        return a
+
+    ends = {}
+    for k, s in enumerate(removed):
+        for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            key = (s.layer, round(x, 3), round(y, 3))
+            if key in ends:
+                par[_find(k)] = _find(ends[key])
+            else:
+                ends[key] = k
+    branches = defaultdict(list)
+    for k, s in enumerate(removed):
+        branches[_find(k)].append(s)
+    for segs in branches.values():
+        s = segs[0]
         mx, my = (s.start_x + s.end_x) / 2.0, (s.start_y + s.end_y) / 2.0
+        more = f" and {len(segs) - 1} more segment(s) of its branch" if len(segs) > 1 else ""
         findings.append(_finding(
             'redundant-cycle', name, s.layer, mx, my,
             f"loop edge ({s.start_x:.3f}, {s.start_y:.3f})-"
-            f"({s.end_x:.3f}, {s.end_y:.3f}); removal leaves connectivity "
-            f"identical",
-            size=math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)))
+            f"({s.end_x:.3f}, {s.end_y:.3f}){more}; removal leaves "
+            f"connectivity identical",
+            size=sum(math.hypot(g.end_x - g.start_x, g.end_y - g.start_y)
+                     for g in segs)))
 
 
 def _strict_removable(net_id, name, net_segs, net_vias, net_pads, has_zone,
@@ -1082,8 +1109,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
         removable = _strict_removable(net_id, name, net_segs, net_vias,
                                       net_pads, has_zone, copper_layers,
                                       thorough, skipped_nets, min_track_w)
-        _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
-                      findings, removable)
+        _check_cycles(net_id, name, net_segs, net_vias, net_pads, net_zones,
+                      findings, removable, copper_layers)
         _check_removable(net_id, name, net_segs, removable, findings)
         _check_stacked(net_id, name, net_segs, net_vias, findings)
         _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
