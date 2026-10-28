@@ -34,9 +34,11 @@ route_multipoint_main / _taps (and with them net_rescue, stub-swap and terminal
 escalation, which call them -- a rescue window is a shallow copy that carries
 the regions), and on the diff-pair side the pair route (its centreline map at
 `centerline_config`, its connectors' base map plain), the hybrid coupled middle
-and its legs (`stamping`). Copper laid by anything else -- the plane finalize's
-taps and region joins, which have their own A*, and post-route passes such as
-meanders -- does not see a region, so the run ends with `audit()` of the board
+and its legs (`stamping`), and the plane region joins
+(plane_region_connector._try_route_between_regions, under repair_planes and the
+in-run plane finalize). Copper laid by anything else -- the plane finalize's
+pad taps, which have their own A*, and post-route passes such as meanders --
+does not see a region, so the run ends with `audit()` of the board
 it ships: bound-net copper found inside a region is printed and reported as
 JSON_SUMMARY / --json-out `net_keepouts`, never shipped silently. KiCad's DRC of
 the rule stays the authority.
