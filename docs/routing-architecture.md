@@ -589,7 +589,7 @@ in memory is always the board that will be written:
 5. **Sweep dead ends** - trim dead-end spurs and unsupported vias
 6. **Neck wide segments** that graze a fine-pitch foreign pad
 7. **Smooth** staircase micro-jogs into octolinear shortcuts (#536; the route step only); a shortcut never crosses a flank of its own net's row pads (`pad_entry.py`)
-8. **Close soft joints** - the last pass that adds copper: bridge any same-net joint that only touches
+8. **Close soft joints** - the last pass that adds copper (a via->pad bridge never crosses a flank of a row pad, `pad_entry.py`: that pad is served through its end): bridge any same-net joint that only touches
 9. **Cut acute corners** - land one arm of each same-net corner under 90 degrees on the other through a perpendicular cut (`acute_corners.py`, #1233); the one pass after close that adds copper, and every cut ends on a kept joint, so it makes no soft joint
 10. **Merge collinear segments** - join same-net, same-layer, same-width pieces into one track (#811)
 
