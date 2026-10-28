@@ -37,10 +37,27 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 
 try:
-    from grid_router import GridObstacleMap, GridRouter
+    from grid_router import GridObstacleMap, GridRouter, SearchCancel
 except ImportError:
     GridObstacleMap = None
     GridRouter = None
+    SearchCancel = None
+
+_SEARCH_POOL = None
+
+
+def _search_pool():
+    """The one worker thread a second, concurrent A* search runs on.
+
+    One worker suffices: a connection runs at most one search beside its own
+    (the backward full search, see _probe_route_with_frontier_once). Created
+    on first use, so a run that never needs it starts no thread."""
+    global _SEARCH_POOL
+    if _SEARCH_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _SEARCH_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix='krt-search')
+    return _SEARCH_POOL
+
 
 def _unblock_debug() -> bool:
     """KICAD_UNBLOCK_DEBUG, from the read-once env_knobs cache.
@@ -1783,14 +1800,32 @@ def _probe_route_with_frontier_once(
     _diag(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
     _dyn_base, _dyn_kw = _dynamic_iterations(config)
-    path, full_iters, full_blocked = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
-        collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
+    # The backward full search is only used when the forward one fails, but it
+    # reads the same map and nothing the forward search does, so it starts NOW
+    # on a second thread (the Rust searches release the GIL) and is cancelled
+    # if the forward search finds a path. The forward result is taken first
+    # exactly as before, so the outcome is the sequential one; only the wall
+    # time of a forward failure drops from forward + backward to the longer.
+    cancel = SearchCancel()
+    backward_full = _search_pool().submit(
+        router.route_with_frontier,
+        obstacles, forward_targets, forward_sources, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
+        collinear_vias=env_knobs.COLLINEAR_VIAS, cancel=cancel, **_dyn_kw)
+    try:
+        path, full_iters, full_blocked = router.route_with_frontier(
+            obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
+            collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
+    except BaseException:
+        cancel.cancel()
+        raise
+    if path is not None:
+        cancel.cancel()
     _note_dynamic_extension(full_iters, _dyn_base, print_prefix)
     first_total_iters += full_iters
     total_iterations += full_iters
 
     if path is not None:
+        backward_full.result()  # cancelled: wait so no search outlives its map
         forward_blocked = []
         fwd_iters, bwd_iters = get_fwd_bwd_iters()
         return path, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
@@ -1799,9 +1834,7 @@ def _probe_route_with_frontier_once(
     _diag(f"{print_prefix}No route found after {full_iters} iterations ({first_label}), trying {second_label}...")
     forward_blocked = full_blocked
 
-    path, backward_full_iters, backward_full_blocked = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
-        collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
+    path, backward_full_iters, backward_full_blocked = backward_full.result()
     _note_dynamic_extension(backward_full_iters, _dyn_base, print_prefix)
     second_total_iters += backward_full_iters
     total_iterations += backward_full_iters
