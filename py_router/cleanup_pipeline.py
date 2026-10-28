@@ -193,6 +193,12 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                                   soft-joint bridges or web connectors and
                                   refuses any removal that makes a soft
                                   joint, so every joint close firmed stands.
+     10c. chamfer_acute_corners -- #1233: land one arm of each acute
+                                  same-net corner on the other through a
+                                  perpendicular cut (acute_corners.py). It
+                                  adds copper after close, legitimately:
+                                  every cut and piece ends exactly on a
+                                  kept joint, so it makes no soft joint.
      11. merge_collinear_segments -- #811: join collinear same-net/layer/width
                                   pieces into one track. Runs AFTER close on
                                   purpose, and is the only pass allowed to:
@@ -595,6 +601,48 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                   + (f" and {_fc_stats['vias']} via(s) they freed"
                      if _fc_stats.get('vias') else "")
                   + " left by smoothing / joint bridging")
+
+    # #1233: cut the acute corners between same-net tracks. After close and
+    # the final collapse, because both lay or leave corners; it adds copper,
+    # but every cut and piece ends exactly on a kept joint, so it makes no
+    # soft joint and #319's contract holds. Protected and impedance nets keep
+    # their geometry (the smoother's skip list). route.py runs it again at
+    # the end of its run, over the copper its finalize lays after this.
+    if env_knobs.ACUTE_CHAMFER and not _judge:
+        _prog("acute-corner chamfer")
+        from acute_corners import chamfer_acute_corners
+        from pcb_modification import make_segment_clears
+        _ac_ro = set()
+        if keep_input_copper:
+            _ac_own = {id(s) for r in results for s in (r.get('new_segments') or [])}
+            _ac_ro = {id(s) for s in pcb_data.segments if id(s) not in _ac_own}
+        _ac_stats = {}
+        _ac_pairs = chamfer_acute_corners(
+            pcb_data, _sub_scope,
+            clears=make_segment_clears(pcb_data, config, config.clearance,
+                                       _nc, _bec),
+            readonly_ids=_ac_ro, skip_net_ids=_smooth_skip_net_ids(pcb_data),
+            stats=_ac_stats)
+        if _ac_pairs:
+            _ac_pieces = {id(h): ps for h, ps in _ac_pairs}
+            _ac_owned = set()
+            for r in results:
+                segs = r.get('new_segments')
+                if segs and any(id(s) in _ac_pieces for s in segs):
+                    _ac_owned.update(id(s) for s in segs if id(s) in _ac_pieces)
+                    r['new_segments'] = [p for s in segs
+                                         for p in _ac_pieces.get(id(s), [s])]
+            _ac_inputs = [h for h, _ps in _ac_pairs if id(h) not in _ac_owned]
+            strip.extend(_ac_inputs)
+            if _ac_inputs:
+                results.append({'new_segments': [p for h in _ac_inputs
+                                                 for p in _ac_pieces[id(h)]],
+                                'new_vias': [], 'cleanup': 'acute_chamfer'})
+        counts['acute_corners_cut'] = _ac_stats.get('cut', 0)
+        _trace('acute_chamfer')
+        if _ac_stats.get('cut'):
+            print(f"{label}Acute corners: cut {_ac_stats['cut']} on "
+                  f"{_ac_stats['nets']} net(s) (#1233)")
 
     # #811 FINAL pass. Geometry-preserving by construction (see the pass
     # docstring), which is what lets it run after close_soft_joints and what
