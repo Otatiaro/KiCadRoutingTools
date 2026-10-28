@@ -1502,7 +1502,22 @@ def _widen_power_stub_legs(stubs, power_w, track_width, clearance, seg_grazes,
     return {k: tuple(v) for k, v in cur.items()}
 
 
-def generate_qfn_fanout(footprint: Footprint,
+def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args, **kwargs):
+    """`_generate_qfn_fanout` with its copper held to the board's net-pair and
+    pad hole-clearance rules (dru_copper_rules): the stub search already
+    refuses a leg that breaks one, and every escape path (stubs, the underpad
+    vias) passes `drop_fanout_violations` before it ships -- a net whose copper
+    still breaks one is dropped whole and reported failed."""
+    from dru_copper_rules import drop_fanout_violations
+    tracks, vias, failed = _generate_qfn_fanout(footprint, pcb_data, *args, **kwargs)
+    tracks, vias, dropped = drop_fanout_violations(pcb_data, tracks, vias)
+    if dropped:
+        print(f"  .kicad_dru net-pair / hole clearance: {len(dropped)} net(s) dropped "
+              f"({', '.join(dropped[:8])}{'...' if len(dropped) > 8 else ''})")
+    return tracks, vias, list(failed) + [n for n in dropped if n not in failed]
+
+
+def _generate_qfn_fanout(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
                         layer: str = "F.Cu",
@@ -1864,6 +1879,8 @@ def generate_qfn_fanout(footprint: Footprint,
                                track_width=track_width, clearance=clearance)
     from kicad_dru import install_layer_clearances
     install_layer_clearances(_obs_cfg, None, None, pcb_data)  # #498
+    from dru_copper_rules import ensure_attached, track_clears as _rule_clears
+    ensure_attached(pcb_data)
     _obs_layer_map = build_layer_map(_obs_cfg.layers)
     _fanned_net_ids = [p.net_id for p in footprint.pads if p.net_id]
     if progress_callback:
@@ -2001,6 +2018,11 @@ def generate_qfn_fanout(footprint: Footprint,
     def _seg_grazes(p1, p2, net_id, cl=clearance, width=track_width):
         # Board edge first (issue #288) - independent of net.
         if _seg_hits_edge(p1, p2, cl, width):
+            return True
+        # The board's net-pair and pad hole-clearance rules (dru_copper_rules):
+        # an isolation barrier or a through-hole lead's hole clearance, which
+        # the map below prices at the layer clearance only.
+        if not _rule_clears(pcb_data, net_id, p1[0], p1[1], p2[0], p2[1], layer, width):
             return True
         # Foreign tracks / vias via the shared obstacle map (issue #149 part 2).
         if _obs_layer_idx is not None:

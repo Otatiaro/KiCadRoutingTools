@@ -5015,6 +5015,17 @@ def generate_bga_fanout(footprint: Footprint,
                        f'plane web under {_ref}',
                        count=sum(1 for _v in vias_to_add
                                  if (_v.get('size') or 0) <= _pw['via'] + 1e-9) or 1)
+    # The board's net-pair and pad hole-clearance rules (dru_copper_rules):
+    # the escape engines price a pair at the layer clearance only, so every
+    # one of them passes here before its copper ships -- a net whose tracks or
+    # vias break an isolation barrier or a through-hole lead's hole clearance
+    # loses its fanout copper and is reported failed (unserved below).
+    from dru_copper_rules import drop_fanout_violations
+    tracks, vias_to_add, _dru_dropped = drop_fanout_violations(pcb_data, tracks, vias_to_add)
+    if _dru_dropped:
+        print(f"  .kicad_dru net-pair / hole clearance: {len(_dru_dropped)} net(s) dropped "
+              f"({', '.join(_dru_dropped[:8])}{'...' if len(_dru_dropped) > 8 else ''})")
+        failed_nets = list(failed_nets) + [n for n in _dru_dropped if n not in failed_nets]
     # #962: via-in-pad needs IPC-4761 Type VII, DECLARED on each via rather
     # than only printed: (capping yes) (filling yes). Once, here, over EVERY
     # via this fanout returns -- the channel escape's in-pad vias (manage_vias
