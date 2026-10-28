@@ -1134,7 +1134,8 @@ def repair_planes(
     # and tap/join copper would route blind to the board's layer rules. Same
     # reasoning as the reconciliation sub-run's forwarded map.
     from kicad_dru import install_layer_clearances, install_track_clearances
-    install_layer_clearances(config, layer_clearances, input_file, pcb_data)
+    install_layer_clearances(config, layer_clearances, input_file, pcb_data,
+                             net_keepouts=True)
     # #1135: and the track-to-track rules, as route.py installs them -- a
     # region join or a pad tap is a track like any other, and a board's
     # `A.Type == 'track' && B.Type == 'track'` rule binds it too (raise-only
@@ -1149,6 +1150,13 @@ def repair_planes(
     _copper_rules = getattr(getattr(config, 'rules', None), 'copper_rules', None)
     if _copper_rules and not getattr(pcb_data, '_dru_copper_rules', None):
         pcb_data._dru_copper_rules = list(_copper_rules)
+    # And its net-filtered keep-out areas (net_keepouts), stamped around the
+    # region joins as route.py stamps them around a route: a join of a net the
+    # area binds stays out of it. Same precedence as the copper rules.
+    _area_keepouts = getattr(getattr(config, 'rules', None), 'net_keepouts', None)
+    if _area_keepouts and not getattr(pcb_data, '_net_keepouts', None):
+        pcb_data._net_keepouts = list(_area_keepouts)
+        pcb_data._net_keepout_cells = {}
 
     # Cross-class clearance (#434): the repair step's own copper (region joins,
     # pad taps) and its ripped-blocker reconnects were priced at the uniform
