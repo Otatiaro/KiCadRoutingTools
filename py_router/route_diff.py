@@ -21,6 +21,8 @@ from __future__ import annotations
 KRT_TOOL = {'scope': ['routing', 'combined'], 'kind': 'actor'}
 
 import env_knobs
+from blas_threads import single_thread_if_main
+single_thread_if_main(__name__)  # before numpy loads: see blas_threads
 import sys
 import os
 from dataclasses import replace
