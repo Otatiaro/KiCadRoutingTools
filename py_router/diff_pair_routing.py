@@ -1056,6 +1056,27 @@ def _pad_edge_launch(pcb_data, net_id, cx, cy, route_x, route_y, config, tol=0.0
     return cx + dx * shift, cy + dy * shift, shift
 
 
+def _row_pad_axial_lead(pcb_data, net_id, x, y, dir_x, dir_y, config):
+    """Length of the straight run from the connector launch (x, y), on a row pad
+    of `net_id` (pad_entry), along the escape (dir_x, dir_y) out to one track
+    width plus clearance past the pad's end: the run a pin of a fine-pitch row
+    is left by before the connector turns toward its partner. 0.0 when (x, y)
+    is on no row pad, or the escape does not run along the pad's axis."""
+    from pad_entry import row_pads
+    for pad in row_pads(pcb_data, net_id):
+        hx, hy = pad.size_x / 2, pad.size_y / 2
+        dx, dy = x - pad.global_x, y - pad.global_y
+        if abs(dx) > hx + 1e-6 or abs(dy) > hy + 1e-6:
+            continue
+        along_x = hx >= hy
+        if abs(dir_x if along_x else dir_y) < 0.99:
+            return 0.0
+        hl = hx if along_x else hy
+        return max(0.0, hl + config.track_width + config.clearance
+                   - (dx * dir_x + dy * dir_y))
+    return 0.0
+
+
 def _min_via_center_distance(config, net_a=None, net_b=None):
     """Minimum centre-to-centre distance between two via drills (#491).
 
@@ -2572,6 +2593,28 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     src_pad_gap_half = math.hypot(p_src_x - n_src_x, p_src_y - n_src_y) / 2
     tgt_pad_gap_half = math.hypot(p_tgt_x - n_tgt_x, p_tgt_y - n_tgt_y) / 2
 
+    # A terminal on two pins of a fine-pitch row (pad_entry): each connector
+    # leaves its pad straight along the axis, one track width plus clearance
+    # past the end (`_row_pad_axial_lead`), and only then turns toward its
+    # partner. The setback is measured from there, at least the taper's own
+    # 45-degree length, so the pair joins beyond the pads rather than in the
+    # gap between them. 0.0 (no change) at any other terminal.
+    src_launch = (center_src_x, center_src_y, setback_src)
+    tgt_launch = (center_tgt_x, center_tgt_y, setback_tgt)
+
+    def _axial_setback(launch, px, py, nx, ny, dx, dy, gap_half):
+        lp = _row_pad_axial_lead(pcb_data, p_net_id, px, py, dx, dy, config)
+        ln = _row_pad_axial_lead(pcb_data, n_net_id, nx, ny, dx, dy, config)
+        lead = max(lp, ln) if lp > 0 and ln > 0 else 0.0
+        if not lead:
+            return launch[0], launch[1], launch[2], 0.0
+        return (launch[0] + dx * lead, launch[1] + dy * lead,
+                max(launch[2], abs(gap_half - spacing_mm) + config.grid_step), lead)
+    center_src_x, center_src_y, setback_src, src_lead = _axial_setback(
+        src_launch, p_src_x, p_src_y, n_src_x, n_src_y, src_dir_x, src_dir_y, src_pad_gap_half)
+    center_tgt_x, center_tgt_y, setback_tgt, tgt_lead = _axial_setback(
+        tgt_launch, p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y, tgt_dir_x, tgt_dir_y, tgt_pad_gap_half)
+
     # Alternate launch layers reachable through each terminal's via/THT barrel,
     # common to both P and N so the pair can launch coupled there (issue #195).
     # Empty when the terminal isn't via-backed -> multilayer search degenerates
@@ -2611,6 +2654,9 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     if not src_candidates and src_dir_synth and not src_flip:
         # Synthesized direction blocked - try escaping from the opposite side
         src_dir_x, src_dir_y = -src_dir_x, -src_dir_y
+        center_src_x, center_src_y, setback_src, src_lead = _axial_setback(
+            src_launch, p_src_x, p_src_y, n_src_x, n_src_y, src_dir_x, src_dir_y,
+            src_pad_gap_half)
         src_candidates, _, src_rotated, src_layer = _find_open_positions_multilayer(
             center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, src_alt_layers,
             setback_src, src_pad_gap_half, "source",
@@ -2644,6 +2690,9 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     if not tgt_candidates and tgt_dir_synth and not tgt_flip:
         # Synthesized direction blocked - try escaping from the opposite side
         tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
+        center_tgt_x, center_tgt_y, setback_tgt, tgt_lead = _axial_setback(
+            tgt_launch, p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y, tgt_dir_x, tgt_dir_y,
+            tgt_pad_gap_half)
         tgt_candidates, _, tgt_rotated, tgt_layer = _find_open_positions_multilayer(
             center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, tgt_alt_layers,
             setback_tgt, tgt_pad_gap_half, "target",
@@ -2778,6 +2827,9 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # Helper to build route_data dict (wraps module-level function with closure vars)
     def make_route_data(pose_path, src_actual_dir, tgt_actual_dir, src_angle, tgt_angle, gnd_via_dirs=None):
         rd = _build_route_data(pose_path, src_actual_dir, tgt_actual_dir, src_angle, tgt_angle, gnd_via_dirs)
+        # The connectors' straight run off a row pad (this call's ends, like p_src_x)
+        rd['src_axial_lead'] = src_lead
+        rd['tgt_axial_lead'] = tgt_lead
         # Record which physical ends have synthesized (flippable) directions,
         # for the polarity flip retry in route_diff_pair_with_obstacles, and
         # the base escape directions actually used (after any flips), for
@@ -3382,20 +3434,43 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     # must have that swath clear or the A* dead-ends between the tightly-spaced stub
     # ends. Search inward from the terminal for the CLOSEST cell whose swath is clear.
     _swath_r = max(1, diff_pair_spacing_grid)
+    # The pair's own row pads are free copper on this map, so the closest clear
+    # swath to a terminal on two neighbouring pins of a row is the gap BETWEEN
+    # the two pads: each leg could then only enter its pad from the side. The
+    # swath is kept clear of those pads with their flanks and axial stubs
+    # (pad_entry.entry_rect), on every layer, so the pair joins beyond the
+    # pads' ends; where no such cell exists the launch is the closest clear one.
+    from pad_entry import entry_rect, row_pads
+    _entry_zones = [entry_rect(p, config) for _nid in (p_net_id, n_net_id)
+                    for p in row_pads(pcb_data, _nid)]
+    _swath_mm = _swath_r * config.grid_step
 
-    def _closest_launch(gx0, gy0, ox, oy, layer):
+    def _in_entry_zone(cx, cy):
+        x, y = coord.to_float(cx, cy)
+        return any(x0 - _swath_mm < x < x1 + _swath_mm and y0 - _swath_mm < y < y1 + _swath_mm
+                   for x0, y0, x1, y1 in _entry_zones)
+
+    def _closest_launch(gx0, gy0, ox, oy, layer, clear_of_pads=False):
         """Closest cell to (gx0,gy0), stepping toward (ox,oy), whose
         diff-pair-wide swath is clear on `layer` -- couple as far as possible, the
-        single-ended leg spans the small remaining gap. Returns (cx,cy) or None."""
+        single-ended leg spans the small remaining gap. Returns (cx,cy) or None.
+        `clear_of_pads`: the swath also stays off the pair's row pads' entry
+        zones."""
         steps = max(int(math.hypot(ox - gx0, oy - gy0)), 1)
         for k in range(0, steps + 1):
             cx = int(round(gx0 + (ox - gx0) * k / steps))
             cy = int(round(gy0 + (oy - gy0) * k / steps))
+            if clear_of_pads and _in_entry_zone(cx, cy):
+                continue
             if not any(obstacles.is_blocked(cx + dxx, cy + dyy, layer)
                        for dxx in range(-_swath_r, _swath_r + 1)
                        for dyy in range(-_swath_r, _swath_r + 1)):
                 return cx, cy
         return None
+
+    def _pad_clear_launch(gx0, gy0, ox, oy, layer):
+        return ((_entry_zones and _closest_launch(gx0, gy0, ox, oy, layer, clear_of_pads=True))
+                or _closest_launch(gx0, gy0, ox, oy, layer))
 
     def _theta_options(ex, ey, slx, sly, arrival):
         """Ordered candidate pose headings (theta_idx) for one coupled-middle end.
@@ -3463,8 +3538,8 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     _selfgraze_fallback = None
     for a_layer, b_layer in layer_pairs:
         # Couple as close to each terminal as this candidate's launch layer allows.
-        _sl = _closest_launch(s_gx0, s_gy0, t_gx0, t_gy0, a_layer)
-        _tl = _closest_launch(t_gx0, t_gy0, s_gx0, s_gy0, b_layer)
+        _sl = _pad_clear_launch(s_gx0, s_gy0, t_gx0, t_gy0, a_layer)
+        _tl = _pad_clear_launch(t_gx0, t_gy0, s_gx0, s_gy0, b_layer)
         if _sl is None or _tl is None:
             _rej(a_layer, b_layer, "no clear diff-pair-wide launch swath at a terminal")
             continue
@@ -3720,54 +3795,68 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             # Legs are not committed to pcb_data here, so trying every plan
             # is cheap; score = length + heavy weight on uncoupled mm. A
             # plan with essentially no uncoupled copper is taken on the spot.
-            best_plan = None  # (score, legs, vias, iters, split)
-            bypassed = 0
-            for plan in leg_plans:
-                leg_state['s'] = {p_net_id: [], n_net_id: []}
-                leg_state['v'] = {p_net_id: [], n_net_id: []}
-                leg_state['path'] = {}
-                plan_iters = 0
-                good = True
-                for net_id, _side in plan:
-                    term, mid_pt = term_by[(net_id, _side)]
-                    pseg, pvia, ppads = _leg_partner_copper(net_id)
-                    _partner = n_net_id if net_id == p_net_id else p_net_id
-                    _apath = leg_state['path'].get((_partner, _side)) if _couple else None
-                    ls, lv, it, lpath = _route_hybrid_leg(
-                        pcb_data, net_id, config, leg_obs, layer_names, coord,
-                        mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads,
-                        mid_vias=mid_vias_by_net[net_id] + leg_state['v'][net_id],
-                        attract_path=_apath,
-                        sibling_margin=0 if _apath else _sib_margin)
-                    plan_iters += it
-                    if ls is None:
-                        good = False
-                        break
-                    leg_state['s'][net_id] += ls
-                    leg_state['v'][net_id] += lv
-                    leg_state['path'][(net_id, _side)] = lpath or []
-                if not good:
-                    continue
-                # #1303: each net's signal must run THROUGH its coupled
-                # middle (`_middle_bypassed`).
-                if any(_middle_bypassed(pcb_data, _nid, mid_vias_by_net[_nid],
-                                        leg_state['s'][_nid], leg_state['v'][_nid],
-                                        terminal_pads=terminal_pads)
-                       for _nid in (p_net_id, n_net_id)):
-                    bypassed += 1
-                    continue
-                _lp = leg_state['s'][p_net_id]
-                _ln = leg_state['s'][n_net_id]
-                _len = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
-                           for s in _lp + _ln)
-                _split = _split_len(_lp, _ln) if _couple else 0.0
-                _score = _len + 3.0 * _split
-                if best_plan is None or _score < best_plan[0]:
-                    best_plan = (_score, _lp + _ln,
-                                 leg_state['v'][p_net_id] + leg_state['v'][n_net_id],
-                                 plan_iters, _split)
-                if not _couple or _split < 1.0:
-                    break  # fully coupled (or coupling off): no need to try more
+            # Every plan is tried with the legs landing on the pair's row pads
+            # through their ends (pad_entry) first; only when none fits are the
+            # flanks left open, and the legs enter from a pad's side as before.
+            def _try_plans(walled):
+                best_plan, bypassed = None, 0  # (score, legs, vias, iters, split)
+                for plan in leg_plans:
+                    leg_state['s'] = {p_net_id: [], n_net_id: []}
+                    leg_state['v'] = {p_net_id: [], n_net_id: []}
+                    leg_state['path'] = {}
+                    plan_iters = 0
+                    good = True
+                    for net_id, _side in plan:
+                        term, mid_pt = term_by[(net_id, _side)]
+                        pseg, pvia, ppads = _leg_partner_copper(net_id)
+                        _partner = n_net_id if net_id == p_net_id else p_net_id
+                        _apath = leg_state['path'].get((_partner, _side)) if _couple else None
+                        ls, lv, it, lpath = _route_hybrid_leg(
+                            pcb_data, net_id, config, leg_obs, layer_names, coord,
+                            mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads,
+                            mid_vias=mid_vias_by_net[net_id] + leg_state['v'][net_id],
+                            attract_path=_apath,
+                            sibling_margin=0 if _apath else _sib_margin,
+                            pad_entry=walled)
+                        plan_iters += it
+                        if ls is None:
+                            good = False
+                            break
+                        leg_state['s'][net_id] += ls
+                        leg_state['v'][net_id] += lv
+                        leg_state['path'][(net_id, _side)] = lpath or []
+                    if not good:
+                        continue
+                    # #1303: each net's signal must run THROUGH its coupled
+                    # middle (`_middle_bypassed`).
+                    if any(_middle_bypassed(pcb_data, _nid, mid_vias_by_net[_nid],
+                                            leg_state['s'][_nid], leg_state['v'][_nid],
+                                            terminal_pads=terminal_pads)
+                           for _nid in (p_net_id, n_net_id)):
+                        bypassed += 1
+                        continue
+                    _lp = leg_state['s'][p_net_id]
+                    _ln = leg_state['s'][n_net_id]
+                    _len = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                               for s in _lp + _ln)
+                    _split = _split_len(_lp, _ln) if _couple else 0.0
+                    _score = _len + 3.0 * _split
+                    if best_plan is None or _score < best_plan[0]:
+                        best_plan = (_score, _lp + _ln,
+                                     leg_state['v'][p_net_id] + leg_state['v'][n_net_id],
+                                     plan_iters, _split)
+                    if not _couple or _split < 1.0:
+                        break  # fully coupled (or coupling off): no need to try more
+                return best_plan, bypassed
+            best_plan, bypassed = _try_plans(True)
+            _legs_walled = True
+            if best_plan is None and _entry_zones:
+                best_plan, _unwalled_bypassed = _try_plans(False)
+                bypassed += _unwalled_bypassed
+                _legs_walled = False
+                if best_plan is not None:
+                    print("      no way in through a row pad's ends, "
+                          "hybrid legs routed entering from a pad's side")
             if best_plan is not None:
                 ok = True
                 _score, leg_segs, leg_vias, leg_iters, _split = best_plan
@@ -3842,7 +3931,8 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                         mid_vias=_own_v,
                         attract_path=_attract if _attract else None,
                         source_taps=_staps or None,
-                        target_taps=_ttaps or None)
+                        target_taps=_ttaps or None,
+                        pad_entry=_legs_walled)
                     if _rs is None:
                         return None
                     return _rs, _rv
@@ -4310,11 +4400,15 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
                       mid_pt, term, partner_segs, partner_vias, pair_vias,
                       partner_pads=None, mid_vias=None,
                       attract_path=None, sibling_margin=0,
-                      source_taps=None, target_taps=None):
+                      source_taps=None, target_taps=None, pad_entry=True):
     """Route ONE point-to-point single-ended leg joining a terminal to the coupled
     middle's near end (term -> mid_pt), routing around partner copper. Returns
     (segs, vias, iters), ([], [], 0) when the terminal already coincides with the
     middle end (nothing to route), or (None, None, 0) if the leg can't be routed.
+
+    pad_entry: the flanks of the net's row pads are blocked for the leg
+    (`pad_entry.stamp`), so it lands on them through their ends. The caller
+    passes False to route from a pad's side when no leg plan fits walled.
 
     mid_vias: this net's OWN freshly-placed vias (its coupled-middle vias plus any
     already-committed sibling legs). They are not in pcb_data yet, so without them
@@ -4526,17 +4620,26 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
             obstacles.add_source_target_cell(mgx, mgy, tgt_l)
         for _tgx, _tgy, _tl in (_tgt_own or {}):
             obstacles.add_source_target_cell(_tgx, _tgy, _tl)
-        path, it = _route_leg(router, obstacles, config, sources, targets,
-                              sibling_margin, pcb_data, net_id)
-        if path is None and sibling_margin:
-            # Reserved sibling room doesn't fit here -- route at normal width
-            # (the sibling leg then finds its own way; completion beats room).
-            if config.verbose:
-                print(f"      leg couple: sibling-room margin ({sibling_margin} cells) "
-                      f"unroutable for net {net_id}; retrying without")
-            path, _it2 = _route_leg(router, obstacles, config, sources, targets,
-                                    0, pcb_data, net_id)
-            it += _it2
+        def _attempt():
+            path, it = _route_leg(router, obstacles, config, sources, targets,
+                                  sibling_margin, pcb_data, net_id)
+            if path is None and sibling_margin:
+                # Reserved sibling room doesn't fit here -- route at normal width
+                # (the sibling leg then finds its own way; completion beats room).
+                if config.verbose:
+                    print(f"      leg couple: sibling-room margin ({sibling_margin} cells) "
+                          f"unroutable for net {net_id}; retrying without")
+                path, _it2 = _route_leg(router, obstacles, config, sources, targets,
+                                        0, pcb_data, net_id)
+                it += _it2
+            return path, it
+        if pad_entry:
+            # The leg lands on the net's row pads through their ends (pad_entry).
+            from pad_entry import stamp as _flank_stamp
+            with _flank_stamp(obstacles, pcb_data, net_id, config):
+                path, it = _attempt()
+        else:
+            path, it = _attempt()
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         if path is None:
@@ -5410,6 +5513,12 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
         p_end, n_end, p_tgt_route, n_tgt_route,
         tgt_stub_dir_tuple, p_sign
     )
+    # Off a fine-pitch row both connectors run straight along the pads' axis
+    # first (_try_route_direction set the setback beyond that run).
+    if route_data.get('src_axial_lead'):
+        src_p_ext = src_n_ext = route_data['src_axial_lead']
+    if route_data.get('tgt_axial_lead'):
+        tgt_p_ext = tgt_n_ext = route_data['tgt_axial_lead']
 
     # Convert P path
     p_segs, p_vias, p_conn_lines = _float_path_to_geometry(

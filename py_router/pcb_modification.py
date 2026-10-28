@@ -556,6 +556,21 @@ def _sense_copper(item) -> bool:
     return bool(getattr(item, 'sense', '') or getattr(item, 'held_by', ''))
 
 
+def _via_pad_stub_crosses_flank(pcb_data, pad, vx, vy, layer, width, config, clr):
+    """True when a via->pad bridge from (vx, vy) to `pad`'s centre would cross
+    a flank of `pad`, a row pad (pad_entry): the via sits beside the pad, and
+    the pad is already served through its end by the route that dropped it."""
+    from types import SimpleNamespace
+    from pad_entry import flank_rects, is_row_pad, segment_crosses_flank
+    fp = pcb_data.footprints.get(pad.component_ref)
+    if fp is None or not is_row_pad(pad, fp.pads):
+        return False
+    # Plane-flow callers pass a minimal config (clearance only).
+    geo = SimpleNamespace(grid_step=getattr(config, 'grid_step', 0.0) or 0.0, clearance=clr)
+    rects = [(set(pad.layers), r) for r in flank_rects(pad, geo, track_width=width)]
+    return segment_crosses_flank(rects, vx, vy, pad.global_x, pad.global_y, layer)
+
+
 def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                       clearance: float = None) -> int:
     """Bridge same-net SOFT JOINTS with a TINY coincident segment (#soft-joint).
@@ -765,6 +780,9 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 if not clears(vp_net, vx, vy, p.global_x, p.global_y,
                               vp_layer, w2):
                     continue  # bridge would graze foreign copper: leave for DRC
+                if _via_pad_stub_crosses_flank(pcb_data, p, vx, vy, vp_layer, w2,
+                                               config, clr):
+                    continue  # a row pad is entered through its end (pad_entry)
                 via_pad_conns.append(Segment(
                     start_x=vx, start_y=vy,
                     end_x=p.global_x, end_y=p.global_y,
