@@ -22,7 +22,9 @@ and again at the end of route.py's run.
      (KICAD_ACUTE_CHAMFER=0) the same boards do carry them, so the boards
      still exercise the defect;
   5. route.py on splitflap_driver: no cut leaves a net in copper fragments
-     (the fragment sweep would send it to the reconciliation).
+     (the fragment sweep would send it to the reconciliation);
+  6. the joint index lists a cell's tracks in insertion order, so the corner
+     a tie between equal angles picks does not change from run to run.
 
     python3 tests/test_1233_acute_corner_chamfer.py
 """
@@ -303,8 +305,25 @@ def splitflap(tmp):
           not acute_corners(parse_kicad_pcb(dst).segments))
 
 
+def index_order():
+    """The joint index lists a cell's tracks in the order they were added, so
+    the arms at a joint -- and the corner a tie between equal angles picks --
+    do not depend on where the tracks sit in memory (a set of ids iterates in
+    address order, which changes run to run)."""
+    print('6. the joint index is reproducible: insertion order, not address order')
+    from acute_corners import CornerIndex
+    from kicad_parser import Segment
+    segs = [Segment(1.0, 1.0, 1.0 + 0.01 * k, 1.2, 0.2, 'F.Cu', 1) for k in range(40)]
+    rng = random.Random(1233)
+    orders = [list(segs), list(reversed(segs)), rng.sample(segs, len(segs))]
+    got = [CornerIndex(o).near(1.0, 1.0, 'F.Cu') for o in orders]
+    check('near() returns the cell in insertion order, for three orders',
+          all([id(s) for s in g] == [id(s) for s in o] for g, o in zip(got, orders)))
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
+        index_order()
         shapes(tmp)
         guards(tmp)
         late_and_pipeline(tmp)
