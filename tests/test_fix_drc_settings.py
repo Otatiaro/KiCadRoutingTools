@@ -50,9 +50,9 @@ def _check_in_run_floor_sync():
         if os.path.exists(pro):
             fails.append("#650: created a .kicad_pro where the board had none")
 
-        # A board declaring LOOSER floors than the run routed to: hole/copper
-        # comes down to the routed clearance (the measured fill driver), and so
-        # does the Default class.
+        # A board declaring LOOSER floors than the run routed to: copper
+        # clearance comes down to the routed clearance, and so does the Default
+        # class. The DECLARED copper-to-hole rule is the board's spec and stays.
         json.dump({"board": {"design_settings": {
                       "rules": {"min_hole_clearance": 0.25, "min_clearance": 0.2}}},
                    "net_settings": {"classes": [
@@ -61,9 +61,9 @@ def _check_in_run_floor_sync():
                   open(pro, "w"))
         changes = apply_routed_floors(pcb, clearance=0.0889)
         rules = json.load(open(pro))["board"]["design_settings"]["rules"]
-        if abs(rules.get("min_hole_clearance", 9) - 0.0889) > 1e-9:
+        if abs(rules.get("min_hole_clearance", 9) - 0.25) > 1e-9:
             fails.append(f"#650: min_hole_clearance = {rules.get('min_hole_clearance')}, "
-                         f"expected 0.0889")
+                         f"expected the declared 0.25")
         if abs(rules.get("min_clearance", 9) - 0.0889) > 1e-9:
             fails.append(f"#650: min_clearance = {rules.get('min_clearance')}, expected 0.0889")
         classes = {c["name"]: c for c in json.load(open(pro))["net_settings"]["classes"]}
@@ -138,8 +138,9 @@ def main():
         # means "not enforced this step", NOT "lower the rule to zero" -- the
         # board's own min_copper_edge_clearance must SURVIVE (KiCad grades
         # copper_edge_clearance from it and the routers now route to it).
+        # The declared copper-to-hole rule stays: only --hole-clearance moves it.
         expect_rules = {"min_clearance": 0.15, "min_via_diameter": 0.4,
-                        "min_hole_clearance": 0.15, "min_through_hole_diameter": 0.3,
+                        "min_hole_clearance": 0.25, "min_through_hole_diameter": 0.3,
                         "min_hole_to_hole": 0.2, "min_copper_edge_clearance": 0.5}
         for k, v in expect_rules.items():
             if abs(rules.get(k, -1) - v) > 1e-9:

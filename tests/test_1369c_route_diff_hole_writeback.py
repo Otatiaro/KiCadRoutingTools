@@ -7,10 +7,12 @@ clearance, so fix_kicad_drc_settings set rules.min_hole_clearance to the
 copper clearance -- 0.25 -> 0.175 on a board whose route_diff copper KiCad
 grades clean at 0.25 -- and the delivered fill then followed the lower value.
 
-It now writes the held value, lowered only to what the step's OWN copper
-needs (fix_kicad_drc_settings.step_copper_to_hole: a P via's drill beside the
-N track can sit under the held value, since a plated hole is held at copper
-clearance), and never below the copper clearance it wrote before.
+It now keeps the held value. The step's OWN copper is measured against it
+(fix_kicad_drc_settings.step_copper_to_hole: a P via's drill beside the N
+track can sit under the held value, since a plated hole is held at copper
+clearance) and copper under it is reported, never written into the rule: a
+declared rule is the board's spec, and lowering it to the step's copper
+relaxed it for every later step of a chain.
 
 Rows:
   A. a route_diff run on a board declaring 0.25 keeps min_hole_clearance 0.25
@@ -18,8 +20,8 @@ Rows:
      own-via-drill-to-foreign-copper, skips same-net pairs, and skips a pair
      whose copper already violates the copper clearance (KiCad reports that
      one as a clearance violation, not a hole one)
-  C. held_hole_clearance: the held value, lowered to the step's own need,
-     never below the copper clearance; None when nothing is declared
+  C. held_hole_clearance: the held value whatever the step's own copper
+     reached; None when nothing is declared
 
     python3 tests/test_1369c_route_diff_hole_writeback.py
 """
@@ -79,8 +81,8 @@ def test_route_diff_keeps_the_held_hole_floor():
         got = rules_of(out).get('min_hole_clearance')
         check('min_hole_clearance is the held 0.25, not the copper clearance',
               near(got, 0.25), got)
-        check('the writeback says what it wrote and why',
-              'Copper-to-hole floor written at 0.25 mm' in log)
+        check('the writeback says what it held and that the rule stays',
+              'held 0.25 mm' in log and "the project's rule is not lowered" in log)
         check('no min_hole_clearance write is listed',
               'rules.min_hole_clearance:' not in log)
 
@@ -155,10 +157,10 @@ def test_held_hole_clearance():
         return
     check('own copper clears it -> the held value',
           near(held_hole_clearance(0.25, 0.1, None), 0.25))
-    check('own copper at 0.195 -> 0.195',
-          near(held_hole_clearance(0.25, 0.1, 0.195), 0.195))
-    check('never below the copper clearance',
-          near(held_hole_clearance(0.25, 0.1, 0.05), 0.1))
+    check('own copper at 0.195 -> still the held value',
+          near(held_hole_clearance(0.25, 0.1, 0.195), 0.25))
+    check('own copper under the copper clearance -> still the held value',
+          near(held_hole_clearance(0.25, 0.1, 0.05), 0.25))
     check('nothing declared -> None (the copper clearance, as before)',
           held_hole_clearance(0.0, 0.1, None) is None)
 

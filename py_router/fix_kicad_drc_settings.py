@@ -152,6 +152,12 @@ _RULE_KEYS = frozenset({
 })
 
 
+#: The `compute_targets` key of the copper-to-hole floor a step falls back to
+#: when it was given no explicit one: written as `min_hole_clearance` only on a
+#: board that declares no such rule, never over a declared one.
+UNDECLARED_HOLE_CLEARANCE = "hole_clearance_if_undeclared"
+
+
 def _class_clearance(targets):
     """The NET-CLASS clearance from a ``compute_targets`` result (mm or None).
 
@@ -1330,10 +1336,12 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     clearance from a hole and the copper-to-hole floor does NOT follow
     ``clearance`` -- only an explicit ``hole_clearance`` is written (#1319).
 
-    One key is NOT a rule: ``class_clearance`` (#900), the net-class clearance,
-    which is the routed value and never carries the ``min_clearance`` caps.
-    ``_RULE_KEYS`` is what keeps it out of the project's rule map; read it with
-    :func:`_class_clearance`."""
+    Two keys are NOT rules: ``class_clearance`` (#900), the net-class
+    clearance, which is the routed value and never carries the
+    ``min_clearance`` caps (read it with :func:`_class_clearance`), and
+    :data:`UNDECLARED_HOLE_CLEARANCE`, the copper-to-hole floor a step that
+    drew copper writes only where the board declares none.
+    ``_RULE_KEYS`` is what keeps both out of the project's rule map."""
     minima = minima or {}
     targets = {}
     if clearance is not None:
@@ -1355,12 +1363,18 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
         _ovr = minima.get("min_pad_clearance_override")
         if _ovr is not None and _ovr > 0 and clearance > _ovr:
             targets["min_clearance"] = round(float(_ovr), 6)
-    # Hole/copper clearance: explicit value, else the copper-clearance floor
-    # when the step drew copper that sits at it (copper_holes).
-    hole_clr = (hole_clearance if hole_clearance is not None
-                else clearance if copper_holes else None)
-    if hole_clr is not None:
-        targets["min_hole_clearance"] = hole_clr
+    # Hole/copper clearance: an explicit value is a rule target like any other.
+    # The copper-clearance floor a step that drew copper falls back to is NOT:
+    # it goes under its own key, which the writers apply only where the board
+    # declares no min_hole_clearance (KiCad's factory 0.25 then grades it). A
+    # declared copper-to-hole rule is the board's own spec, and a routing step
+    # never writes it down: copper under it is a violation to report, not a
+    # reason to relax the rule (a chain took a declared 0.2 to 0.182 for one
+    # tap via, then to 0.09 at the next step).
+    if hole_clearance is not None:
+        targets["min_hole_clearance"] = hole_clearance
+    elif clearance is not None and copper_holes:
+        targets[UNDECLARED_HOLE_CLEARANCE] = clearance
     if hole_to_hole is not None:
         targets["min_hole_to_hole"] = hole_to_hole
     # Edge: 0.0 means "no edge clearance was enforced" (the CLI default), NOT
@@ -1531,6 +1545,11 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
         if cur is None or cur > target + EPS:        # lower only; never raise
             changes.append(f"rules.{key}: {cur} -> {target} mm")
             rules[key] = target
+    _undeclared = targets.get(UNDECLARED_HOLE_CLEARANCE)
+    if _undeclared is not None and rules.get("min_hole_clearance") is None:
+        _undeclared = round(float(_undeclared), 6)
+        changes.append(f"rules.min_hole_clearance: None -> {_undeclared} mm")
+        rules["min_hole_clearance"] = _undeclared
 
     # KiCad enforces copper clearance PER NET CLASS (rules.min_clearance alone
     # does not relax it), so keep the Default class at the floor too -- creating
@@ -1922,8 +1941,10 @@ def apply_routed_floors(board_pcb: str, clearance=None, hole_clearance=None,
     phantom, and kicad-cli is the DEMAND gate of the #648 source union, so they
     become junk welds in the longest leg of the chain.
 
-    COPPER floors only -- clearance / hole-to-copper, the net classes that
-    follow them, and copper-to-edge, which is what changes zone fill. The edge
+    COPPER floors only -- clearance / hole-to-copper (only where the board
+    declares no copper-to-hole rule: a declared one is never written down, see
+    :func:`compute_targets`), the net classes that follow them, and
+    copper-to-edge, which is what changes zone fill. The edge
     is the one floor this RAISES (#1449): the run routes at the fab-edge pin
     (#441) and the writeback ships ``max(board rule, routed edge, fab edge)``,
     so ``edge_clearance`` (the run's resolved edge clearance) is written the
@@ -2403,34 +2424,32 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
 
 def held_hole_clearance(held, clearance, step_min=None):
     """The copper-to-hole floor a routing step writes back when it HELD the
-    board's declared hole clearance ``held`` (#1369).
+    board's declared hole clearance ``held`` (#1369): ``held`` itself.
 
     route_diff holds NPTH walls at the board's own ``min_hole_clearance``
     (:func:`obstacle_map.resolve_hole_clearance`) and used to write the floor
-    down to its copper clearance anyway, which the delivered fill then
-    followed. It now writes what it held, lowered only to what its OWN copper
-    needs -- ``step_min`` from :func:`step_copper_to_hole`, the smallest
-    distance from the copper it drew to a foreign hole, which can sit under
-    the held value (a P via's drill beside the N track: a plated hole's copper
-    is held at copper clearance, not at the hole floor) -- and never below
-    ``clearance``, which is what the step wrote before and the floor its
-    copper was routed to.
+    down to its copper clearance, which the delivered fill then followed; it
+    then wrote it down to what its OWN copper reached (``step_min``, from
+    :func:`step_copper_to_hole`). Neither: a declared rule is the board's spec,
+    and copper under it is a violation KiCad reports, not a reason to relax
+    the rule for every later step. ``step_min`` is accepted for the callers
+    that measured it and does not move the value.
 
-    ``held`` 0 / None (the board declares no hole clearance): None, and the
-    writer falls back to ``clearance`` as before."""
+    ``held`` 0 / None (the board declares no hole clearance), or
+    ``clearance`` None: None, and the writer falls back to ``clearance`` on a
+    board that declares no copper-to-hole rule."""
     if not held or held <= 0 or clearance is None:
         return None
-    v = float(held) if step_min is None else min(float(held), float(step_min))
-    return round(max(float(clearance), v), 6)
+    return round(float(held), 6)
 
 
 def step_hole_clearance(input_pcb, output_pcb, clearance, verbose=True):
     """:func:`held_hole_clearance` for a file-writing step: the hole floor the
     step held (``obstacle_map.declared_hole_clearance`` of its INPUT, the
-    value its engine resolved), lowered to what the copper it drew
-    (:func:`drawn_copper_items`) needs. None when the board declares no hole
-    clearance or a board cannot be read -- the writer then falls back to the
-    copper clearance, as before."""
+    value its engine resolved). The copper it drew (:func:`drawn_copper_items`)
+    is measured against it, and copper under it is reported, never written
+    into the rule. None when the board declares no hole clearance above the
+    copper clearance or a board cannot be read."""
     try:
         from obstacle_map import declared_hole_clearance
         held, _src = declared_hole_clearance(None, input_pcb)
@@ -2439,22 +2458,24 @@ def step_hole_clearance(input_pcb, output_pcb, clearance, verbose=True):
     if not held or held <= 0 or clearance is None or held <= clearance:
         return None
     out, segs, vias = drawn_copper_items(input_pcb, output_pcb)
-    if out is None:
-        return None
-    try:
-        step_min = step_copper_to_hole(out, segs, vias, held, clearance)
-    except Exception as e:                                      # noqa: BLE001
-        if verbose:
-            print(f"  (copper-to-hole census skipped: {e}); hole floor follows "
-                  f"the copper clearance")
-        return None
+    step_min = None
+    if out is not None:
+        try:
+            step_min = step_copper_to_hole(out, segs, vias, held, clearance)
+        except Exception as e:                                  # noqa: BLE001
+            if verbose:
+                print(f"  (copper-to-hole census skipped: {e})")
     v = held_hole_clearance(held, clearance, step_min)
     if verbose and v is not None:
-        why = (f"its own copper sits {step_min:g} mm from a foreign hole"
-               if step_min is not None and step_min < held else
-               "its own copper clears every foreign hole by it")
-        print(f"  Copper-to-hole floor written at {v:g} mm: the step held "
-              f"{held:g} mm and {why} (#1369)")
+        if step_min is not None and step_min < held - _FLOOR_EPS:
+            print(f"  WARNING: this step's own copper sits {step_min:g} mm from "
+                  f"a foreign hole, under the copper-to-hole {held:g} mm it "
+                  f"held; the project's rule is not lowered, and KiCad will "
+                  f"report it (#1369)")
+        else:
+            print(f"  Copper-to-hole: the step held {held:g} mm and its own "
+                  f"copper clears every foreign hole by it; the project's "
+                  f"rule is not lowered (#1369)")
     return v
 
 
@@ -2888,6 +2909,13 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
     _declared = live_declared_rules(board) or {}
     _class_declared = live_declares_default_class(board)
     _mc_before = (bds.m_MinClearance / MM) if "min_clearance" in _declared else None
+    if targets.get(UNDECLARED_HOLE_CLEARANCE) is not None \
+            and targets.get("min_hole_clearance") is None \
+            and "min_hole_clearance" not in _declared:
+        # The file writer's twin: the fallback floor reaches a board that
+        # declares no copper-to-hole rule, never a declared one.
+        targets = dict(targets)
+        targets["min_hole_clearance"] = targets[UNDECLARED_HOLE_CLEARANCE]
     for key, target in targets.items():
         a = attr.get(key)
         if a is None or target is None or not hasattr(bds, a):
