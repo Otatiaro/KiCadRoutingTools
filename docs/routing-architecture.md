@@ -245,6 +245,7 @@ the area outside the outline, cutouts) live in a separate per-layer bitmap
 7. **Free Via Positions** - Same-net through-hole pads, where a layer change costs nothing
 8. **Soft costs** - Stub proximity, per-layer track proximity, plane fragility, history congestion, cross-layer attraction
 9. **Keep-out areas** (stamped as blocked cells by Python) - KiCad `(zone ... (keepout ...))` rule areas blocking tracks and/or vias (per the keepout flags) on their listed layers, or all routing layers if none are listed; User-layer keepout polygons (`--keepout`); net-filtered keep-outs from `.kicad_dru` `disallow` rules, stamped only while a net a rule binds is routing; foreign pours this run cannot repair (#1260)
+10. **Row-pad flanks** (stamped as blocked cells by Python, `pad_entry.py`) - while a net routes, the long sides of each of its pads in a fine-pitch row (QFP, QFN, SOIC, an SMD header): every cell off the grid column nearest the pad's axis, along the pad and one track width plus clearance past each end. The track lands on the pad through an end and leaves it straight along its axis, instead of running down the gap between two pins of the package and jogging in from the side. A net that cannot reach a row pad through either end is routed again without them, from the pad's side, and the console says so: the flanks are lifted for the search and the via-in-pad unblock ladder that follow (`_route_with_via_unblock`)
 
 ### Building the Obstacle Map
 
@@ -587,7 +588,7 @@ in memory is always the board that will be written:
 4. **Prune redundant cycles**, then collapse strictly redundant copper and remove orphan islands (#217)
 5. **Sweep dead ends** - trim dead-end spurs and unsupported vias
 6. **Neck wide segments** that graze a fine-pitch foreign pad
-7. **Smooth** staircase micro-jogs into octolinear shortcuts (#536; the route step only)
+7. **Smooth** staircase micro-jogs into octolinear shortcuts (#536; the route step only); a shortcut never crosses a flank of its own net's row pads (`pad_entry.py`)
 8. **Close soft joints** - the last pass that adds copper: bridge any same-net joint that only touches
 9. **Cut acute corners** - land one arm of each same-net corner under 90 degrees on the other through a perpendicular cut (`acute_corners.py`, #1233); the one pass after close that adds copper, and every cut ends on a kept joint, so it makes no soft joint
 10. **Merge collinear segments** - join same-net, same-layer, same-width pieces into one track (#811)
