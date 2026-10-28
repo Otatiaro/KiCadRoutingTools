@@ -5,7 +5,7 @@ The compiled half of KiCad Routing Tools: the Python extension module
 searches and obstacle map, the placer's per-move kernels, and the grid searches
 of the `awx/` whole-route bus router. The rest is Python that calls in here.
 
-**Current Version: 0.24.1** (the crate version in `Cargo.toml`)
+**Current Version: 0.25.0** (the crate version in `Cargo.toml`)
 
 > **Release note:** the newest published release is
 > [v0.23.7](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.23.7)
@@ -322,6 +322,7 @@ Methods:
   - `max_iterations_ceiling`: above `max_iterations`, the search earns further `max_iterations` tranches up to the ceiling while it keeps closing in by `max(quantum_cells, quantum_pct% of the remaining estimate)` (#529; 0 = off); `grace_tranches` tolerates that many tranches without progress (0 = off; see 0.19.3)
   - `via_rung`: which via size's legality to search with (0 = the configured via)
 - `route_with_frontier(...)`: the same arguments; returns `(path, iterations, blocked_cells)`, where `blocked_cells` (a list of (gx, gy, layer) that stopped the search) is empty on success
+- Both searches run with the GIL released, so two of them can run at once on Python threads (on the same obstacle map: they only read it). `cancel=None` takes a `SearchCancel`; once another thread calls its `cancel()`, the search stops at its next iteration and returns no path (and, for `route_with_frontier`, no frontier): its caller discards it. A token is single-use. `PoseRouter.route_pose` and `route_pose_with_frontier` release the GIL too.
 - `set_proximity_heuristic_cost(cost)`: set before each route
 - `set_attraction_path([(gx, gy, layer), ...])`, `clear_attraction_path()`: the path bus members are attracted to (an empty list clears it)
 
@@ -456,6 +457,19 @@ src/
 - **Placement kernels**: the trees and gap trees keep the Python's float expressions in order; the crossing and pad-hit kernels skip pairs whose boxes cannot meet; the congestion kernels sum a move's change over the cells it reaches, so their totals can differ from a whole-window Python sum in the last bits
 
 ## Version History
+
+### 0.25.0 (2026-10-28)
+- **Searches run with the GIL released** (`router.rs`, `pose_router.rs`):
+  `GridRouter.route_multi` / `route_with_frontier` and
+  `PoseRouter.route_pose` / `route_pose_with_frontier` search inside
+  `py.allow_threads`, on the `&GridObstacleMap` they already only read
+  (0.24.0 asserts it `Send + Sync`), so Python threads can run searches side
+  by side. The searches themselves are unchanged: same paths, iterations and
+  frontiers.
+- `SearchCancel` (new class) and the `cancel=None` argument of the two
+  `GridRouter` searches: another thread stops a search whose result is no
+  longer needed. `single_ended_routing` uses it to run a connection's
+  backward full search beside its forward one.
 
 ### 0.24.1 (2026-10-28)
 - **Stub proximity stamped a disk at a time** (`obstacle_map.rs`,

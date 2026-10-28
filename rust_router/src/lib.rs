@@ -146,6 +146,7 @@ fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<GridObstacleMap>()?;
     m.add_class::<GridRouter>()?;
+    m.add_class::<router::SearchCancel>()?;
     m.add_class::<PoseRouter>()?;
     m.add_function(wrap_pyfunction!(identify_blocking_obstacles, m)?)?;
     m.add_function(wrap_pyfunction!(lane_search::lane_search, m)?)?;
