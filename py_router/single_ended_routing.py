@@ -92,6 +92,14 @@ _LAYER_OF = attrgetter('layer')
 # at this cap -- and ran faster (1.9 s vs 2.1 s; 64 KB chunks: 3.1 s).
 # A call under the cap takes exactly the one-matrix path it always did.
 _SWEEP_CHUNK = 65536
+# The sweeps first drop the windowed items whose lower bound already exceeds
+# an upper bound on the result (see _seg_foreign_seg_dist): the 5 mm window
+# keeps hundreds of items on a dense board, a handful of which can hold the
+# minimum. Below this many items the bounds cost more than they save. The
+# slack (mm) absorbs the rounding of the bounds themselves, so a kept set
+# always contains the item the full sweep would have chosen.
+_PRUNE_MIN_ITEMS = 32
+_PRUNE_SLACK = 1e-6
 
 
 def _pad_corner_radius(pad):
@@ -346,12 +354,45 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         return best_custom
     fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
     frc, frs = rc[near], rs[near]
+    fnids = nids[near]
     excess = None
     if base_clearance is not None:
         excess = np.maximum(plc[near] - base_clearance, 0.0)
+    if fcx.size > _PRUNE_MIN_ITEMS:
+        # Sweep only the pads that can hold the minimum (as in
+        # _seg_foreign_seg_dist): a pad's distance is at least the gap between
+        # the probe's bbox and the pad's bbox, less its largest excess, and
+        # sample 0 of the sweep is the probe's first endpoint, whose distance
+        # to any pad bounds the result from above.
+        px0, px1, py0, py1 = min(x1, x2), max(x1, x2), min(y1, y2), max(y1, y2)
+        fex, fey = ex[near], ey[near]
+        gap = np.hypot(
+            np.maximum(np.maximum((fcx - fex) - px1, px0 - (fcx + fex)), 0.0),
+            np.maximum(np.maximum((fcy - fey) - py1, py0 - (fcy + fey)), 0.0))
+        ddx = x1 - fcx
+        ddy = y1 - fcy
+        lx = np.abs(ddx * frc + ddy * frs)
+        ly = np.abs(-ddx * frs + ddy * frc)
+        d0 = np.hypot(np.maximum(lx - (fhx - fcr), 0.0),
+                      np.maximum(ly - (fhy - fcr), 0.0)) - fcr
+        own_ex = excess if excess is not None else 0.0
+        upper = float(np.min(d0 - own_ex))
+        max_cls = 0.0
+        if base_clearance is not None and net_clearances:
+            max_cls = max(0.0, max(net_clearances.values(), default=0.0) - base_clearance)
+        # inside its bbox a pad's signed distance can go down to minus its
+        # smaller half-extent
+        floor = np.where(gap > 0.0, gap, -np.minimum(fhx, fhy))
+        keep = floor - own_ex - max_cls <= upper + _PRUNE_SLACK
+        if not keep.all():
+            fcx, fcy, fhx, fhy, fcr = fcx[keep], fcy[keep], fhx[keep], fhy[keep], fcr[keep]
+            frc, frs, fnids = frc[keep], frs[keep], fnids[keep]
+            if excess is not None:
+                excess = excess[keep]
+    if base_clearance is not None:
         if net_clearances:
             fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
-                             for f in nids[near]], dtype=float)
+                             for f in fnids], dtype=float)
             excess = np.maximum(excess, fcls)
     # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
     # rotated by R(-rot); identity for axis-aligned pads): shrink the
@@ -569,11 +610,36 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     abx = bx - ax; aby = by - ay                      # (M,)
     L2 = abx * abx + aby * aby                         # (M,)
     safe_L2 = np.where(L2 > 0, L2, 1.0)
+    fnid = nid[near]
+    if ax.size > _PRUNE_MIN_ITEMS:
+        # Sweep only the items that can hold the minimum. Every sampled (or
+        # exact) distance is at least the gap between the probe's bbox and the
+        # item's centreline bbox, less its half-width and the largest class
+        # excess; the probe's first endpoint is sample 0 of the sweep and a
+        # point of the segment, so its distance to any item bounds the result
+        # from above. An item whose lower bound exceeds that cannot be the
+        # minimum, and the minimum of the rest is the same float.
+        px0, px1, py0, py1 = min(x1, x2), max(x1, x2), min(y1, y2), max(y1, y2)
+        gap = np.hypot(
+            np.maximum(np.maximum(np.minimum(ax, bx) - px1, px0 - np.maximum(ax, bx)), 0.0),
+            np.maximum(np.maximum(np.minimum(ay, by) - py1, py0 - np.maximum(ay, by)), 0.0))
+        pax0 = x1 - ax; pay0 = y1 - ay
+        tt0 = np.where(L2 > 0, np.clip((pax0 * abx + pay0 * aby) / safe_L2, 0.0, 1.0), 0.0)
+        upper = float(np.min(np.hypot(pax0 - tt0 * abx, pay0 - tt0 * aby) - hw))
+        max_excess = 0.0
+        if net_clearances or track_clearances:
+            max_excess = max(0.0, max(max((net_clearances or {}).values(), default=0.0),
+                                      max((track_clearances or {}).values(), default=0.0))
+                             - base_clearance)
+        keep = gap - hw - max_excess <= upper + _PRUNE_SLACK
+        if not keep.all():
+            ax, ay, bx, by, hw = ax[keep], ay[keep], bx[keep], by[keep], hw[keep]
+            abx, aby, L2, safe_L2 = abx[keep], aby[keep], L2[keep], safe_L2[keep]
+            fnid = fnid[keep]
     excess = None
     if net_clearances or track_clearances:
         # #436: fold each foreign net's class-excess into its distance.
         # The track-rule value raises the same per-foreign requirement (#735).
-        fnid = nid[near]
         _nc = net_clearances or {}
         _tc = track_clearances or {}
         excess = np.array([max(0.0,
