@@ -151,12 +151,19 @@ def _foreign_pad_arrays(pcb_data, layer):
     # STRAIGHT THROUGH the invisible pads (the 24 pad-segment violations on
     # the iteration boards). Mirror the seg/via caches: signature tuple +
     # setattr REBIND on mismatch, so each pcb_data view owns its arrays.
-    _sig = (id(pcb_data.pads_by_net),
-            sum(len(v) for v in pcb_data.pads_by_net.values()))
+    # Under a caller's `_foreign_seg_arr_trust` (it edits no copper in
+    # place, pads included) the pad count is not re-summed on every call --
+    # O(nets) per query, a fifth of the smoothing pass -- only the
+    # identity of pads_by_net is checked.
     cache = getattr(pcb_data, '_foreign_pad_arr_cache', None)
-    if cache is None or not isinstance(cache, tuple) or cache[0] != _sig:
-        cache = (_sig, {})
-        pcb_data._foreign_pad_arr_cache = cache
+    if not (getattr(pcb_data, '_foreign_seg_arr_trust', False)
+            and isinstance(cache, tuple)
+            and cache[0][0] == id(pcb_data.pads_by_net)):
+        _sig = (id(pcb_data.pads_by_net),
+                sum(len(v) for v in pcb_data.pads_by_net.values()))
+        if cache is None or not isinstance(cache, tuple) or cache[0] != _sig:
+            cache = (_sig, {})
+            pcb_data._foreign_pad_arr_cache = cache
     cache = cache[1]
     arr = cache.get(layer)
     if arr is None:
@@ -809,8 +816,11 @@ def _foreign_hole_capsules(pcb_data):
     the 0.0 that every other corpus NPTH pad carries."""
     from check_drc import _pad_has_no_copper
     from kicad_parser import pad_drill_capsule
-    sig = sum(len(p) for p in pcb_data.pads_by_net.values())
     cache = getattr(pcb_data, '_foreign_hole_cap_cache', None)
+    # The pad count is not re-summed under `_foreign_seg_arr_trust` (see
+    # _foreign_pad_arrays).
+    trusted = cache is not None and getattr(pcb_data, '_foreign_seg_arr_trust', False)
+    sig = cache[0] if trusted else sum(len(p) for p in pcb_data.pads_by_net.values())
     if cache is None or cache[0] != sig:
         nid, ax, ay, bx, by, r, lc = [], [], [], [], [], [], []
         for pad_net, pads in pcb_data.pads_by_net.items():
