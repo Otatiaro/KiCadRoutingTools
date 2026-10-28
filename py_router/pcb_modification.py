@@ -3265,6 +3265,198 @@ def split_kicad_dangling_hosts(pcb_data: PCBData, scope_net_ids=None,
     return pairs
 
 
+def drop_vias_beside_own_tht(board: PCBData, scope_net_ids, *, config=None,
+                             clearance: float = 0.1, net_clearances=None,
+                             board_edge_clearance: float = 0.0,
+                             protected_ids=frozenset(), skip_net_ids=(),
+                             max_chain_segs: int = 64, stats=None):
+    """Remove a via that changes layer beside a through-hole pad of its own
+    net, laying the pad-side stub on the via's other layer instead.
+
+    The shape: a track leaves a plated through-hole pad on layer A, runs a
+    simple chain (no tee, no via, no other pad) to a via, and the net goes on
+    from the via on layer B only. The pad's barrel already joins A and B, so
+    the via is redundant as soon as the stub can run on B. The router lays
+    the shape when foreign copper blocks B beside the pad -- the via is then
+    the crossing, and stays -- and it outlives that reason when a later step
+    moves the blocker (a ripped and rerouted neighbour).
+
+    Candidates, first that clears wins: the stub as laid, moved to B; then the
+    octolinear paths from the pad centre to the via (direct, or one bend) when
+    shorter than the stub. Every new track is judged by make_segment_clears,
+    the rules the router kept. Per net, a change that check_net_connectivity
+    grades worse is undone.
+
+    Left alone: a via that is locked / sense-held or in `protected_ids`, or
+    whose stub is; a via in a pad, beside another same-net via, tee'd on a
+    track body, or reached on more than two layers; a net in `skip_net_ids`
+    (protected pairs and matched groups, impedance nets: their geometry is the
+    spec) or with a pour (the via may feed it).
+
+    Mutates `board`. Returns (segments removed, vias removed, segments added);
+    `stats` gets 'nets', 'vias' and 'blocked' (candidate vias kept because
+    no stub on B clears).
+    """
+    from check_connected import check_net_connectivity
+    from connectivity import endpoint_reaches_via
+
+    tol = COINCIDENCE_TOL
+    copper = list(getattr(board.board_info, 'copper_layers', None) or ['F.Cu', 'B.Cu'])
+    clears = make_segment_clears(board, config, clearance, net_clearances,
+                                 board_edge_clearance)
+    skip = set(skip_net_ids or ())
+    zoned = {z.net_id for z in (getattr(board, 'zones', None) or [])}
+
+    def span(v):
+        idx = [copper.index(L) for L in v.layers if L in copper]
+        if len(idx) < 2:
+            return set()
+        return set(copper[min(idx):max(idx) + 1])
+
+    def pad_layers(p):
+        if any('*' in L for L in p.layers):
+            return set(copper)
+        return {L for L in p.layers if L in copper}
+
+    def through(p):
+        return (getattr(p, 'drill', 0) or 0) > 0 and \
+            getattr(p, 'pad_type', '') != 'np_thru_hole'
+
+    def near(ax, ay, bx, by):
+        return math.hypot(ax - bx, ay - by) <= tol
+
+    removed_s, removed_v, added = [], [], []
+    nets_done, blocked = set(), 0
+    by_net_segs, by_net_vias = {}, {}
+    for s in board.segments:
+        by_net_segs.setdefault(s.net_id, []).append(s)
+    for v in board.vias:
+        by_net_vias.setdefault(v.net_id, []).append(v)
+
+    for v in list(board.vias):
+        nid = v.net_id
+        if (not nid or nid not in scope_net_ids or nid in skip or nid in zoned
+                or is_immutable_copper(v) or id(v) in protected_ids):
+            continue
+        segs = by_net_segs.get(nid, [])
+        pads = board.pads_by_net.get(nid, [])
+        vlayers = span(v)
+        if not vlayers or any(o is not v and math.hypot(o.x - v.x, o.y - v.y)
+                              <= (o.size + v.size) / 2
+                              for o in by_net_vias.get(nid, [])):
+            continue
+        if any(endpoint_reaches_pad(v.x, v.y, v.size / 2, list(vlayers), p)
+               for p in pads):
+            continue                                    # via in a pad
+        at, tee = [], False
+        for s in segs:
+            if s.layer not in vlayers:
+                continue
+            ends = [(s.start_x, s.start_y), (s.end_x, s.end_y)]
+            if any(near(x, y, v.x, v.y) for x, y in ends):
+                at.append(s)
+            elif any(endpoint_reaches_via(x, y, s.width / 2, v, [s.layer], copper)
+                     for x, y in ends):
+                tee = True                              # reaches the barrel off-centre
+            elif point_to_segment_distance(v.x, v.y, s.start_x, s.start_y,
+                                           s.end_x, s.end_y) <= s.width / 2 + v.size / 2:
+                tee = True                              # via on a track body
+        layers_at = {s.layer for s in at}
+        if tee or len(layers_at) != 2:
+            continue
+        found = None
+        for la in sorted(layers_at):
+            first = [s for s in at if s.layer == la]
+            if len(first) != 1:
+                continue
+            lb = (layers_at - {la}).pop()
+            chain, (px, py), cur, pad = [], (v.x, v.y), first[0], None
+            while len(chain) < max_chain_segs:
+                chain.append(cur)
+                px, py = ((cur.end_x, cur.end_y) if near(cur.start_x, cur.start_y, px, py)
+                          else (cur.start_x, cur.start_y))
+                hit = [p for p in pads
+                       if endpoint_reaches_pad(px, py, cur.width / 2, [la], p)]
+                if hit:
+                    if len(hit) == 1 and through(hit[0]) and \
+                            {la, lb} <= pad_layers(hit[0]):
+                        pad = hit[0]
+                    break
+                nxt = [s for s in segs if s.layer == la and s not in chain
+                       and (near(s.start_x, s.start_y, px, py)
+                            or near(s.end_x, s.end_y, px, py))]
+                if len(nxt) != 1 or any(near(o.x, o.y, px, py)
+                                        for o in by_net_vias.get(nid, [])):
+                    break
+                cur = nxt[0]
+            if pad is None or any(is_immutable_copper(s) or id(s) in protected_ids
+                                  for s in chain):
+                continue
+            # Nothing else of the net may touch the stub: moving it would
+            # strand that copper.
+            ids = {id(s) for s in chain}
+
+            def on_chain(x, y, r):
+                return any(point_to_segment_distance(x, y, c.start_x, c.start_y,
+                                                     c.end_x, c.end_y) <= c.width / 2 + r
+                           for c in chain)
+            if any(s.layer == la and id(s) not in ids
+                   and (on_chain(s.start_x, s.start_y, s.width / 2)
+                        or on_chain(s.end_x, s.end_y, s.width / 2)) for s in segs):
+                continue
+            if any(o is not v and la in span(o) and on_chain(o.x, o.y, o.size / 2)
+                   for o in by_net_vias.get(nid, [])):
+                continue
+            if any(p is not pad and la in pad_layers(p)
+                   and on_chain(p.global_x, p.global_y, max(p.size_x, p.size_y) / 2)
+                   for p in pads):
+                continue
+            found = (la, lb, chain, pad)
+            break
+        if found is None:
+            continue
+        la, lb, chain, pad = found
+        w = max(c.width for c in chain)
+        stub_len = sum(math.hypot(c.end_x - c.start_x, c.end_y - c.start_y) for c in chain)
+        cands = [[(c.start_x, c.start_y, c.end_x, c.end_y, c.width) for c in chain]]
+        for mids in _octolinear_bends((pad.global_x, pad.global_y), (v.x, v.y)):
+            pts = [(pad.global_x, pad.global_y)] + list(mids) + [(v.x, v.y)]
+            legs = [(a[0], a[1], b[0], b[1], w) for a, b in zip(pts, pts[1:])
+                    if not near(a[0], a[1], b[0], b[1])]
+            if legs and sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2, _w in legs) \
+                    < stub_len - 1e-6:
+                cands.append(legs)
+        pick = next((c for c in cands
+                     if all(clears(x1, y1, x2, y2, lb, nid, cw)
+                            for x1, y1, x2, y2, cw in c)), None)
+        if pick is None:
+            blocked += 1
+            continue
+        new = [Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2, width=cw,
+                       layer=lb, net_id=nid) for x1, y1, x2, y2, cw in pick]
+        before = check_net_connectivity(nid, segs, by_net_vias.get(nid, []), pads, [])
+        ids = {id(s) for s in chain}
+        segs_after = [s for s in segs if id(s) not in ids] + new
+        vias_after = [o for o in by_net_vias.get(nid, []) if o is not v]
+        after = check_net_connectivity(nid, segs_after, vias_after, pads, [])
+        if (len(after.get('disconnected_pads') or []) >
+                len(before.get('disconnected_pads') or [])
+                or (before.get('connected') and not after.get('connected'))):
+            continue
+        board.segments = [s for s in board.segments if id(s) not in ids] + new
+        board.vias = [o for o in board.vias if o is not v]
+        by_net_segs[nid] = segs_after
+        by_net_vias[nid] = vias_after
+        removed_s.extend(chain)
+        removed_v.append(v)
+        added.extend(new)
+        nets_done.add(nid)
+    if stats is not None:
+        stats.update({'nets': len(nets_done), 'vias': len(removed_v),
+                      'blocked': blocked})
+    return removed_s, removed_v, added
+
+
 def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
                           keep_input_copper: bool = False
                           ) -> Tuple[int, int, List[Segment]]:
