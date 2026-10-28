@@ -363,6 +363,16 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
     return saved_result, ripped_net_ids, was_in_results
 
 
+# Orientations within this many mm^2 of zero are not taken as a side: on
+# COLLINEAR segments every orientation is zero up to rounding, and its sign
+# then flips at random -- two collinear tracks 4 mm apart were reported
+# crossing (distance 0), so a restore was refused for a short that did not
+# exist. Collinear and touching cases fall through to the endpoint distances,
+# which are exact for them; a true crossing this close to an endpoint is within
+# ~1e-9 mm of it, and the endpoint distance says so.
+_ORIENT_TOL = 1e-9
+
+
 def _segs_cross(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> bool:
     """True if the two segments properly intersect (centerlines cross)."""
     def ccw(ox, oy, px, py, qx, qy):
@@ -371,7 +381,9 @@ def _segs_cross(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> bool:
     d2 = ccw(bx0, by0, bx1, by1, ax1, ay1)
     d3 = ccw(ax0, ay0, ax1, ay1, bx0, by0)
     d4 = ccw(ax0, ay0, ax1, ay1, bx1, by1)
-    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+    t = _ORIENT_TOL
+    return (((d1 > t and d2 < -t) or (d1 < -t and d2 > t)) and
+            ((d3 > t and d4 < -t) or (d3 < -t and d4 > t)))
 
 
 def _seg_seg_dist_sq(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> float:
