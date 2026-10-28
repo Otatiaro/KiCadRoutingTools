@@ -2054,9 +2054,12 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     """Route a single net on `obstacles`; see `_route_net_with_obstacles_impl`.
 
     Net-filtered keep-outs binding this net are stamped for the
-    duration of the route and removed afterwards (`net_keepouts.stamp`)."""
+    duration of the route and removed afterwards (`net_keepouts.stamp`), and
+    so are the flanks of its row pads, which it enters through their ends
+    (`pad_entry.stamp`)."""
     from net_keepouts import stamp as _nk_stamp
-    with _nk_stamp(obstacles, pcb_data, (net_id,), config):
+    from pad_entry import stamp as _flank_stamp
+    with _nk_stamp(obstacles, pcb_data, (net_id,), config),             _flank_stamp(obstacles, pcb_data, net_id, config):
         return _route_net_with_obstacles_impl(pcb_data, net_id, config, obstacles,
                                               *args, **kwargs)
 
@@ -4476,9 +4479,11 @@ def route_multipoint_main(pcb_data: PCBData, net_id: int, config: GridRouteConfi
     """Phase 1 of multi-point routing; see `_route_multipoint_main_impl`.
 
     Net-filtered keep-outs binding this net are stamped for the
-    duration of the route and removed afterwards (`net_keepouts.stamp`)."""
+    duration of the route and removed afterwards (`net_keepouts.stamp`), and
+    so are the flanks of its row pads (`pad_entry.stamp`)."""
     from net_keepouts import stamp as _nk_stamp
-    with _nk_stamp(obstacles, pcb_data, (net_id,), config):
+    from pad_entry import stamp as _flank_stamp
+    with _nk_stamp(obstacles, pcb_data, (net_id,), config),             _flank_stamp(obstacles, pcb_data, net_id, config):
         return _route_multipoint_main_impl(pcb_data, net_id, config, obstacles,
                                            *args, **kwargs)
 
@@ -5327,10 +5332,12 @@ def route_multipoint_taps(
     free_vias = _free_via_cells_on_entry(obstacles, pcb_data, net_id, config,
                                          main_result)
     result = None
-    # Net-filtered keep-outs binding this net, removed on every exit.
+    # Net-filtered keep-outs binding this net and its row-pad flanks
+    # (pad_entry), removed on every exit.
     from net_keepouts import stamp as _nk_stamp
+    from pad_entry import stamp as _flank_stamp
     try:
-        with _nk_stamp(obstacles, pcb_data, (net_id,), config):
+        with _nk_stamp(obstacles, pcb_data, (net_id,), config),                 _flank_stamp(obstacles, pcb_data, net_id, config):
             # The scoped copy is taken AFTER the lift and the keep-outs: the
             # #977 lift registry is keyed by map, so a copy taken first would
             # be lifted a second time.

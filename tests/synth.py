@@ -177,6 +177,22 @@ class RoutingBoard:
             '(uuid "%s")\n      (effects (font (size 0.5 0.5) (thickness 0.1))))\n'
             '    %s\n  )' % (self._uid(), x, y, ref, self._uid(), pad))
 
+    def part(self, ref, x, y, pads):
+        """A multi-pad SMD footprint at (x, y): `pads` lists
+        (number, dx, dy, size_x, size_y, net) per pad, offsets from the
+        footprint origin."""
+        rows = []
+        for num, dx, dy, sx, sy, net in pads:
+            n = self.net(net)
+            rows.append('    (pad "%s" smd rect (at %s %s) (size %s %s) '
+                        '(layers "F.Cu" "F.Mask") (net %d "%s") (uuid "%s"))'
+                        % (num, dx, dy, sx, sy, n, net, self._uid()))
+        self.items.append(
+            '  (footprint "synth:U" (layer "F.Cu") (uuid "%s") (at %s %s)\n'
+            '    (property "Reference" "%s" (at 0 -2 0) (layer "F.SilkS") '
+            '(uuid "%s")\n      (effects (font (size 0.5 0.5) (thickness 0.1))))\n'
+            '%s\n  )' % (self._uid(), x, y, ref, self._uid(), '\n'.join(rows)))
+
     def seg(self, x1, y1, x2, y2, net, w=0.3, layer='F.Cu', locked=False,
             uid=None):
         self.items.append(
