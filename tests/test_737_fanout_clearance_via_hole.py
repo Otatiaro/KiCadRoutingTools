@@ -848,8 +848,12 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
             self.skipTest('SKIP: git ls-files exited %d (%s) -- the tracked '
                           'corpus cannot be identified here'
                           % (out.returncode, out.stderr.strip()[:120]))
+        # tests/fixtures/1400/ is a ROUTED board frozen as test_1400's scene
+        # (its 0.9/0.5 signal vias, ring 0.20), not a board a user hands the
+        # router: the claim below is about the boards routed, so it is left out.
         return [os.path.join(_ROOT, q) for q in out.stdout.split(chr(0))
-                if q.endswith('.kicad_pcb')]
+                if q.endswith('.kicad_pcb')
+                and not q.startswith('tests/fixtures/1400/')]
 
     def test_no_tracked_via_is_fat_enough_for_the_gate_to_bind(self):
         boards = self._tracked()
