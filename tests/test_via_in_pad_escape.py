@@ -13,6 +13,12 @@ Repro: routing glasgow_revC `/IO_Banks/IO_Buffer_B/*` boxes in RN-network pads
 Without the escape this subset leaves a pad floating (1 FAILED); with it, all
 37 nets / 90 pads connect, and the forced via must be DRC-clean.
 
+The board is routed from a copy declaring min_hole_clearance HOLE_FLOOR, the
+floor its 0.3/0.2 and 0.25/0.15 vias hold at this clearance (clearance + their
+0.05 ring). glasgow_revC declares 0.25, which KiCad grades at via drills too:
+there the escape via this test relied on sat inside the floor (kicad-cli: 14
+hole_clearance), and with the floor held the subset no longer completes.
+
     python3 tests/test_via_in_pad_escape.py
 """
 import json
@@ -23,12 +29,28 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "py_router"))
 BOARD = os.path.join(ROOT, "kicad_files", "glasgow_revC.kicad_pcb")
 CLEARANCE = "0.1"
+HOLE_FLOOR = 0.15
 
 
-def run_route(out):
-    cmd = [sys.executable, "py_router/route.py", BOARD,
+def stage(tmp):
+    """A copy of BOARD whose project declares HOLE_FLOOR."""
+    from copy_board import copy_board
+    src = os.path.join(tmp, "glasgow.kicad_pcb")
+    copy_board(BOARD, src)
+    pro = src[:-len(".kicad_pcb")] + ".kicad_pro"
+    with open(pro, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    doc["board"]["design_settings"]["rules"]["min_hole_clearance"] = HOLE_FLOOR
+    with open(pro, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2)
+    return src
+
+
+def run_route(board, out):
+    cmd = [sys.executable, "py_router/route.py", board,
            "--output", out,
            "--nets", "/IO_Banks/IO_Buffer_B/*",
            "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
@@ -54,8 +76,13 @@ def main():
     print("=" * 60)
     print("Issue #189 via-in-pad escape regression test")
     print("=" * 60)
-    out = tempfile.mktemp(suffix=".kicad_pcb")
-    txt = run_route(out)
+    with tempfile.TemporaryDirectory() as tmp:
+        return _main(tmp)
+
+
+def _main(tmp):
+    out = os.path.join(tmp, "out.kicad_pcb")
+    txt = run_route(stage(tmp), out)
     checks = []
 
     # The via-in-pad escape used to be REQUIRED here, but the exact obstacle
@@ -83,10 +110,6 @@ def main():
         drc = run_drc(out)
         checks.append(("DRC clean at routed clearance",
                        "NO DRC VIOLATIONS FOUND" in drc))
-        for ext in (".kicad_pcb", ".kicad_pro"):
-            p = out[:-len(".kicad_pcb")] + ext
-            if os.path.exists(p):
-                os.remove(p)
 
     for name, ok in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
