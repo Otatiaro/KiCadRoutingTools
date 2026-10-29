@@ -468,6 +468,21 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             return clearance
         return c
 
+    # A via's HOLE is held at the board's plated floor too (KiCad's
+    # hole_clearance): copper of another net keeps
+    # config.via_copper_clearance from a via whose ring is narrower than
+    # that floor minus the copper clearance, as the routing map stamps it.
+    # Copper that moved beside a ripped via while it was out (a shortcut the
+    # smoother took through its vacated corridor) is otherwise accepted at
+    # the copper clearance alone when the via comes back.
+    hc = getattr(config, 'plated_hole_clearance', 0.0) if config is not None else 0.0
+
+    def _vclr(c, *vs):
+        for v in vs:
+            if hc > 0:
+                c = config.via_copper_clearance(c, v.size, getattr(v, 'drill', None))
+        return c
+
     # Bounding box of the saved route, expanded, to prefilter pcb_data copper.
     # #1138: the box reaches the largest threshold any pair can have -- the
     # widest restored item's half size plus the widest pair clearance -- and
@@ -485,7 +500,7 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
         ys.append(v.y)
         own_half = max(own_half, v.size / 2.0)
     margin = own_half + (config.max_pair_clearance(base=clearance)
-                         if pairwise else clearance)
+                         if pairwise else clearance) + max(0.0, hc)
     minx, maxx = min(xs) - margin, max(xs) + margin
     miny, maxy = min(ys) - margin, max(ys) + margin
 
@@ -529,7 +544,7 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
                 if first_only:
                     return hits
         for v in o_vias:
-            thr = hw + v.size / 2.0 + _clr(s.net_id, v, s.layer, 'layer')
+            thr = hw + v.size / 2.0 + _vclr(_clr(s.net_id, v, s.layer, 'layer'), v)
             if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
                                s.end_x, s.end_y) < thr * thr:
                 _hit('via', v)
@@ -540,13 +555,13 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     for vv in vias:
         vr = vv.size / 2.0
         for v in o_vias:
-            thr = vr + v.size / 2.0 + _clr(vv.net_id, v, None, 'stack')
+            thr = vr + v.size / 2.0 + _vclr(_clr(vv.net_id, v, None, 'stack'), vv, v)
             if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
                 _hit('via', v)
                 if first_only:
                     return hits
         for o in o_segs:
-            thr = vr + o.width / 2.0 + _clr(vv.net_id, o, o.layer, 'layer')
+            thr = vr + o.width / 2.0 + _vclr(_clr(vv.net_id, o, o.layer, 'layer'), vv)
             if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
                                o.end_x, o.end_y) < thr * thr:
                 _hit('segment', o)
