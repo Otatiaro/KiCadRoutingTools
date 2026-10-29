@@ -48,7 +48,10 @@ Key fields:
   rippable — `{net, verdict: "boxed_in_static", iterations, geometry:
   {grid_step, clearance, track_width, via_diameter}}`. Static obstacles
   (neighbouring pads + clearance), not congestion: the lever is a finer grid
-  or smaller clearance/track, unless `geometry` is already at the floor.
+  or smaller clearance/track, unless `geometry` is already at the floor. Not
+  given when the wall is copper a flag could let the run rip (pre-existing or
+  reconciliation-frozen nets, named by the `preexisting` blockers entry and its
+  `--rip-existing-nets` hint); KiCad-locked copper still counts as static.
 - `fanout_dropped`: per failed net with a ball its fanout never escaped —
   `{net, pad, component, plane_like, pads}` (#652). The fix is upstream of
   this step: re-run the fanout for that net, or, when `plane_like`, the plane.

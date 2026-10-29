@@ -749,12 +749,33 @@ def run_reroute_loop(
                 if not reroute_succeeded:
                     if not ripped_items:
                         print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
-                        from routing_diagnostics import static_boxin_hint, condense_hint
+                        from routing_diagnostics import (static_boxin_hint,
+                                                         preexisting_blocker_hint,
+                                                         condense_hint)
+                        # #301: copper this run may not rip is named first; a
+                        # wall of it is not a static box-in. The cells were
+                        # popped into blocked_cells when attribution ran.
+                        _cells301 = (list(blocked_cells)
+                                     if routed_net_paths and result else
+                                     list((result or {}).get('blocked_cells_forward') or [])
+                                     + list((result or {}).get('blocked_cells_backward') or []))
+                        hint301, blockers301 = preexisting_blocker_hint(
+                            _cells301, config, pcb_data, ripped_net_id,
+                            routed_net_ids=routed_net_ids, return_names=True)
                         hint, _boxin = static_boxin_hint(
-                            result, config, pcb_data, return_verdict=True)
+                            result, config, pcb_data, return_verdict=True,
+                            copper_blockers=blockers301)
                         hint = condense_hint(hint)
                         if hint:
                             print(f"  {hint}")
+                        if hint301:
+                            _c301 = condense_hint(hint301)
+                            if _c301:
+                                print(f"  {_c301}")
+                            record_net_event(state, ripped_net_id,
+                                             "preexisting_blockers", {
+                                                 "hint": hint301,
+                                                 "blockers": blockers301})
                         if _boxin:
                             record_net_event(state, ripped_net_id,
                                              "boxed_in_static", _boxin)

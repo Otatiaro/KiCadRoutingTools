@@ -955,7 +955,8 @@ def same_net_pad_seal_hint(pcb_data, config, net_id, net_name=None,
     return _ret('')
 
 
-def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
+def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False,
+                      copper_blockers=None):
     """One-line hint when a route died immediately with nothing rippable.
 
     A failure with almost no A* iterations and no rippable blockers means the
@@ -968,6 +969,15 @@ def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
     `preexisting_blocker_hint`'s `return_names=True` uses -- so callers can
     record the static-vs-congestion decision as data (`boxed_in` in the
     summary) instead of only printing it.
+
+    `copper_blockers` names the nets whose copper the failed search met but
+    this run may not rip (`preexisting_blocker_hint(..., return_names=True)`:
+    copper committed by an earlier step, or the whole board when the
+    end-of-run reconciliation retries a net against it). A wall of copper is
+    not a static box-in -- a finer grid or narrower track will not open it,
+    ripping those nets will -- so with any named, no static verdict is given
+    and the caller's #301 hint says what to rip. KiCad-locked copper does not
+    count: no flag rips it (#521), so a wall of it is as static as a pad.
     """
     def _ret(hint, verdict=None):
         return (hint, verdict) if return_verdict else hint
@@ -988,7 +998,15 @@ def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
             f"{refused['net_width_mm']:g} mm outside that pad entry. Open a "
             f"wider channel to the pad, or allow narrowing (--escalation fab).",
             dict(refused, verdict='pad_entry_allowance', iterations=iters))
-    if iters >= 20000:
+    if copper_blockers and pcb_data is not None:
+        try:
+            from protected_nets import cached_protection_map
+            _prot = cached_protection_map(pcb_data)
+            copper_blockers = [n for n in copper_blockers
+                               if _prot.get(n) != 'locked']
+        except Exception:
+            pass
+    if iters >= 20000 or copper_blockers:
         return _ret("")
     finer = config.grid_step / 2
     # Don't steer users into an OOM (issue #105): halving the grid step
