@@ -460,6 +460,70 @@ def _seed_list(spec):
     return out
 
 
+def _dispatch(runs, jobs):
+    """Run `runs` [(seed, out, cmd)], `jobs` at a time, each logging beside
+    its board as .log; yield (seed, out, exit code, its JSON_SUMMARY or None)
+    as each ends."""
+    import subprocess
+    live = []
+    pending = list(runs)
+    while pending or live:
+        while pending and len(live) < jobs:
+            s, out, cmd = pending.pop(0)
+            log = open(os.path.splitext(out)[0] + '.log', 'w', encoding='utf-8')
+            live.append((s, out, log, subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)))
+        fin = [x for x in live if x[3].poll() is not None]
+        if not fin:
+            time.sleep(0.2)
+            continue
+        s, out, log, proc = fin[0]
+        live.remove(fin[0])
+        log.close()
+        summary = None
+        with open(os.path.splitext(out)[0] + '.log', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('JSON_SUMMARY: '):
+                    summary = json.loads(line[len('JSON_SUMMARY: '):])
+        yield s, out, proc.returncode, summary
+
+
+def _preselect(a, seeds, passed, jobs):
+    """`--forced-keep K`: each forced seed's start is first only made legal
+    (`--forced-legalize-only`, a fraction of an anneal's time), in its own
+    process, written to `forced_pool/` beside OUT; the K whose legal start
+    costs least go on to the anneal, with the seeds that start otherwise. A start's cost foretells its anneal's
+    (measured on one board: correlation 0.7, the best of 138 starts annealed
+    routing with 40% fewer open nets than seeds taken at random), so many
+    cheap starts and few anneals beat as many anneals. Returns the seeds to
+    anneal, or None on a failure."""
+    forced = [s for s in seeds if s in set(_seed_list(a.forced_seeds or ''))]
+    if len(forced) <= a.forced_keep:
+        return seeds
+    # beside the boards, where they can be looked at: one legal start per seed
+    pool = os.path.join(os.path.dirname(a.out) or '.', 'forced_pool')
+    os.makedirs(pool, exist_ok=True)
+    runs = [(s, os.path.join(pool, f's{s}.kicad_pcb'),
+             [sys.executable, '-X', 'utf8', os.path.abspath(__file__), a.board,
+              os.path.join(pool, f's{s}.kicad_pcb')] + passed
+             + ['--seed', str(s), '--forced-legalize-only'])
+            for s in forced]
+    print(f"place_simple: {len(forced)} forced start(s) made legal, the {a.forced_keep} cheapest "
+          f"annealed ({jobs} at a time; starts in {pool})")
+    cost = {}
+    for s, out, rc, summary in _dispatch(runs, jobs):
+        if summary and rc in (0, 4):
+            cost[s] = summary['final']['cost']
+            print(f"  start {s}: cost {cost[s]:.1f}")
+        else:
+            print(f"  start {s}: exit {rc}, no summary (see {os.path.splitext(out)[0]}.log)")
+    if not cost:
+        print("place_simple: no forced start came out legal", file=sys.stderr)
+        return None
+    keep = set(sorted(cost, key=lambda s: (cost[s], s))[:a.forced_keep])
+    print(f"place_simple: forced seeds kept: {', '.join(str(s) for s in seeds if s in keep)}")
+    return [s for s in seeds if s not in forced or s in keep]
+
+
 def _many_seeds(ap, a):
     """`--seeds` (or the default seeds): each seed a `--seed` run of this
     script in its own process, `--jobs` at a time, every other option passed
@@ -481,7 +545,7 @@ def _many_seeds(ap, a):
               file=sys.stderr)
         return 2
     skip = {'help', 'board', 'out', 'seed', 'seeds', 'jobs', 'json',
-            'scattered', 'clustered', 'anchored', 'forced', 'judge'}
+            'scattered', 'clustered', 'anchored', 'forced', 'judge', 'forced_keep'}
     passed = []
     for act in ap._actions:
         if act.dest in skip or not act.option_strings:
@@ -499,6 +563,10 @@ def _many_seeds(ap, a):
         elif val is not None:
             passed += [act.option_strings[0], str(val)]
     jobs = max(1, a.jobs or min(len(seeds), 4))
+    if a.forced_keep:
+        seeds = _preselect(a, seeds, passed, jobs)
+        if seeds is None:
+            return 2
     runs = []
     for s in seeds:
         out = a.out.format(seed=s)
@@ -521,27 +589,9 @@ def _many_seeds(ap, a):
     except Exception:                                        # noqa: BLE001
         pass
     print(f"place_simple: seeds {', '.join(map(str, seeds))} ({jobs} at a time)")
-    live, done, summaries = [], {}, {}
-    pending = list(runs)
-    while pending or live:
-        while pending and len(live) < jobs:
-            s, out, cmd = pending.pop(0)
-            log = open(os.path.splitext(out)[0] + '.log', 'w', encoding='utf-8')
-            live.append((s, out, log, subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)))
-        fin = [x for x in live if x[3].poll() is not None]
-        if not fin:
-            time.sleep(0.2)
-            continue
-        s, out, log, proc = fin[0]
-        live.remove(fin[0])
-        rc = proc.returncode
-        log.close()
+    done, summaries = {}, {}
+    for s, out, rc, summary in _dispatch(runs, jobs):
         done[s] = rc
-        summary = None
-        with open(os.path.splitext(out)[0] + '.log', encoding='utf-8') as f:
-            for line in f:
-                if line.startswith('JSON_SUMMARY: '):
-                    summary = json.loads(line[len('JSON_SUMMARY: '):])
         if summary:
             summaries[s] = summary
             fin = summary['final']
@@ -785,6 +835,10 @@ def build_parser():
     ap.add_argument('--forced-legalize-only', action='store_true',
                     help="a forced start is only made legal (overlaps shoved apart, each part "
                          "then to its nearest legal pose), not annealed")
+    ap.add_argument('--forced-keep', type=int, metavar='K', default=0,
+                    help="with several --forced-seeds: make each forced start legal first (as "
+                         "--forced-legalize-only, in its own process) and anneal only the K "
+                         "whose legal start costs least (default 0: anneal every seed)")
     ap.add_argument('--force-param', metavar='KEY=VALUE', action='append',
                     help="a forced start's setting (placement/force.py ForceParams: "
                          "attraction, repulsion, bin_mm, lambda_rate, ...), repeatable")
