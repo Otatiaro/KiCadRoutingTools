@@ -18,7 +18,7 @@ from pcb_modification import add_route_to_pcb_data
 from dataclasses import replace
 from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_endpoints,
                                _route_direct_coupled_middle, _seg_to_seglist_min_edge)
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, place_blocker_at_rung
 from protected_nets import rip_refusal
 from rip_up_reroute import rip_up_net, restore_net
 from obstacle_cache import refresh_net_obstacles  # #806
@@ -807,15 +807,9 @@ def route_diff_pairs(
                             if next_blocker is None:
                                 print(f"  No additional rippable blockers from retry analysis")
                                 break
-                            next_canonical = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
-                            if next_canonical not in seen_canonical_ids:
-                                seen_canonical_ids.add(next_canonical)
-                                rippable_blockers.append(next_blocker)
-                            for idx, b in enumerate(rippable_blockers):
-                                if get_canonical_net_id(b.net_id, diff_pair_by_net_id) == next_canonical:
-                                    if idx != N - 1 and N - 1 < len(rippable_blockers):
-                                        rippable_blockers[idx], rippable_blockers[N-1] = rippable_blockers[N-1], rippable_blockers[idx]
-                                    break
+                            place_blocker_at_rung(rippable_blockers, seen_canonical_ids,
+                                                  next_blocker, N, diff_pair_by_net_id,
+                                                  get_canonical_net_id)
 
                         if N > len(rippable_blockers):
                             break

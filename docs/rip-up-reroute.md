@@ -37,7 +37,7 @@ The failure report printed to the console comes from this analysis ("Route stuck
 Two refinements sharpen the signal before ranking:
 
 - **Fastest-failing direction.** The search runs from both ends; the side that died in fewer iterations is the constrained one, and its frontier is the drained pocket's perimeter (hugging track included). Attribution uses that side's cells rather than pooling both directions, so the broad flood cannot swamp the tight pocket. This applies in the single-ended, reroute, victim-retry, and multipoint tap paths.
-- **Per-edge attribution (multipoint).** When several tap edges of one net fail, each edge is attributed separately against its *own* target, and the per-net results merge by taking each net's strongest edge — a net decisive at one edge is not diluted by edges it is irrelevant to, and a pooled "cell soup" can no longer promote a net relevant to none of them.
+- **Per-edge attribution (multipoint).** When several tap edges of one net fail, each edge is attributed separately against its *own* target, and the per-net results merge by taking each net's strongest edge — a net decisive at one edge is not diluted by edges it is irrelevant to, and a pooled "cell soup" can no longer promote a net relevant to none of them. In the tap cascade the drained side is the one whose search stopped below the probe limit while the other ran on (without that signature, the side with fewer cells), every rung is attributed that way, and of the pocket's walls the ones the other side's flood also meets rank first: they separate the pocket from the rest of the net, while a wall with dead ground behind it does not.
 
 ### Blocker selection algorithms
 
@@ -216,7 +216,7 @@ the reconciliation sub-run and the plane finalize's reconnects all carry
 For a failing net, the router escalates through rip-up rounds (`reroute_loop.py`):
 
 1. **N=1**: rip the top-ranked blocker, rebuild obstacles, retry the route.
-2. If the retry fails, the *new* frontier is re-analyzed — the next blocker is chosen from fresh data, not the original ranking, since ripping one net changes what's in the way.
+2. If the retry fails, the *new* frontier is re-analyzed — the next blocker is chosen from fresh data, not the original ranking, since ripping one net changes what's in the way. The pick takes the next rung's slot even when it was already further down the first ranking (`place_blocker_at_rung`, shared by every ladder).
 3. **Slot-0 guard**: if the re-analysis names a *different* top pick than the ripped singleton, the refuted rip is restored and the fresh pick is tried **alone** once before extending to pairs. Without this, the ladder only ever grows a prefix around its first guess, so a wrong first pick contaminated every combination it would ever try.
 4. **N=2**: rip the next blocker as well (now two are ripped), retry. And so on up to `--max-ripup`.
 

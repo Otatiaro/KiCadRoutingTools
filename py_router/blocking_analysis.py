@@ -964,6 +964,51 @@ def filter_rippable_blockers(
     return rippable_blockers, seen_canonical_ids
 
 
+def nets_meeting_cells(net_ids, cells, obstacle_cache: Dict,
+                       extra_clearance: float = 0.0) -> Set[int]:
+    """The nets of `net_ids` whose copper blocks at least one of `cells`.
+
+    Reads the obstacle cells analyze_frontier_blocking left in
+    `obstacle_cache` for those nets (pass the cache it was given; a net
+    missing from it is skipped) and records nothing: a membership question
+    about a frontier that is not being attributed."""
+    if not cells:
+        return set()
+    arr = np.asarray(list(cells), dtype=np.int64)
+    keys = frozenset(_pack_cells(arr[:, :2], arr[:, 2]).tolist())
+    met = set()
+    for nid in net_ids:
+        cached = obstacle_cache.get((nid, extra_clearance))
+        if cached is not None and not (keys.isdisjoint(cached[0])
+                                       and keys.isdisjoint(cached[1])):
+            met.add(nid)
+    return met
+
+
+def place_blocker_at_rung(rippable_blockers: List[BlockingInfo],
+                          seen_canonical_ids: Set[int], blocker: BlockingInfo,
+                          N: int, diff_pair_by_net_id: Dict,
+                          get_canonical_net_id_func) -> None:
+    """Make `blocker` the one rung N rips: slot N-1 of `rippable_blockers`.
+
+    A rip ladder rips rippable_blockers[N-1] at rung N. For N > 1 it
+    re-analyzes the last retry's frontier and picks the most-blocking net not
+    yet ripped; that pick is appended when new, and in either case swapped
+    into slot N-1 -- a pick already on the first-attempt list would otherwise
+    wait for its old slot while rung N ripped whatever stale entry sat there.
+    """
+    canonical = get_canonical_net_id_func(blocker.net_id, diff_pair_by_net_id)
+    if canonical not in seen_canonical_ids:
+        seen_canonical_ids.add(canonical)
+        rippable_blockers.append(blocker)
+    for idx, b in enumerate(rippable_blockers):
+        if get_canonical_net_id_func(b.net_id, diff_pair_by_net_id) == canonical:
+            if idx != N - 1 and N - 1 < len(rippable_blockers):
+                rippable_blockers[idx], rippable_blockers[N - 1] = \
+                    rippable_blockers[N - 1], rippable_blockers[idx]
+            break
+
+
 if __name__ == "__main__":
     print("Blocking analysis module")
     print("Use analyze_frontier_blocking() with data from route_with_frontier()")

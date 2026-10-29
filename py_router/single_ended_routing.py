@@ -5566,7 +5566,7 @@ def _route_multipoint_taps_impl(
     # Each edge connects a routed pad to an unrouted pad
     edges_routed = 0
     failed_edges = set()  # Track edges that failed to route
-    failed_edge_blocking = {}  # edge_key -> (blocked_cells, tgt_xy, {'fwd','bwd','extra'} dir split)
+    failed_edge_blocking = {}  # edge_key -> (blocked_cells, tgt_xy, {'fwd','bwd','extra','iters'} dir split)
     fallback_attempted = set()  # Pads attempted directly after their MST edge chain failed
     max_passes = len(remaining_edges) * 2 + len(pad_info)  # Safety limit
 
@@ -5784,7 +5784,7 @@ def _route_multipoint_taps_impl(
         # routed one, and then nothing needs explaining.
         with deferred_diagnostics(config) as _edge_diag:
             (path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path,
-             _, _, necked_down, uniform_width, unblock_vias,
+             tap_fwd_iters, tap_bwd_iters, necked_down, uniform_width, unblock_vias,
              unblock_segments) = _route_with_via_unblock(
                 router, obstacles, config, sources, targets, track_margin,
                 pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
@@ -5894,12 +5894,13 @@ def _route_multipoint_taps_impl(
                 # backward probe from a walled-in pad drains in dozens of
                 # iterations and its frontier is precisely the pocket wall --
                 # pooling buried it under the forward flood. The cascade
-                # picks the tighter side per edge; 'extra' carries the
-                # synthetic via-conflict cells either way.
+                # picks the drained side per edge ('iters' says which);
+                # 'extra' carries the synthetic via-conflict cells either way.
                 failed_edge_blocking[edge_key] = (
                     blocked_cells, (tgt_x, tgt_y),
                     {'fwd': list(forward_blocked), 'bwd': list(backward_blocked),
-                     'extra': list(_via_conflict_extra)})
+                     'extra': list(_via_conflict_extra),
+                     'iters': (tap_fwd_iters, tap_bwd_iters)})
             continue
 
         print(f"      Routed in {tap_iterations} iterations ({tap_elapsed:.2f}s)")
@@ -5978,7 +5979,8 @@ def _route_multipoint_taps_impl(
                     blocked_cells, (tgt_x, tgt_y),
                     {'fwd': list(forward_blocked),
                      'bwd': list(backward_blocked),
-                     'extra': list(_via_conflict_extra)})
+                     'extra': list(_via_conflict_extra),
+                     'iters': (tap_fwd_iters, tap_bwd_iters)})
             continue
         # Any fab-floor via dropped INSIDE the boxed target pad to unblock this
         # edge (issue #189) -- it connects the inner-layer path end to the pad by

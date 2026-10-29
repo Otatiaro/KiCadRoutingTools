@@ -82,7 +82,7 @@ from single_ended_routing import (route_net_with_obstacles,
                                   route_multipoint_main, route_oracle_links,
                                   deferred_diagnostics, flush_diagnostics,
                                   uncommit_dropped_result)
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking, place_blocker_at_rung
 from protected_nets import rip_refusal
 from rip_up_reroute import rip_up_net, restore_net
 from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
@@ -1211,16 +1211,9 @@ def route_single_ended_nets(
                                     N = 0
                                     continue
                             # Replace the Nth blocker with the one from retry analysis
-                            next_canonical = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
-                            if next_canonical not in seen_canonical_ids:
-                                seen_canonical_ids.add(next_canonical)
-                                rippable_blockers.append(next_blocker)
-                            # Find and move it to position N-1 if needed
-                            for idx, b in enumerate(rippable_blockers):
-                                if get_canonical_net_id(b.net_id, diff_pair_by_net_id) == next_canonical:
-                                    if idx != N - 1 and N - 1 < len(rippable_blockers):
-                                        rippable_blockers[idx], rippable_blockers[N-1] = rippable_blockers[N-1], rippable_blockers[idx]
-                                    break
+                            place_blocker_at_rung(rippable_blockers, seen_canonical_ids,
+                                                  next_blocker, N, diff_pair_by_net_id,
+                                                  get_canonical_net_id)
 
                         if N > len(rippable_blockers):
                             break  # Not enough blockers to rip
