@@ -990,8 +990,77 @@ class Model:
         if not set(pa.sides) & set(pb.sides):
             return 0.0      # on opposite faces, neither drilled
         if min(pa.pin_count, pb.pin_count) <= HALO_SMALL_PADS and self.wired(a, b):
-            return 0.0      # a decap's own chip: priced in its cluster (`_offside_halo`)
+            small, chip = (a, b) if pa.pin_count <= pb.pin_count else (b, a)
+            if self._is_decap(small) or chip not in self._fine or self._claimed_at(small, chip):
+                return 0.0      # a decap's own chip: priced in its cluster (`_offside_halo`);
+                #                 a claim's: the intent puts it there
+            return self._wired_halo(small, chip)
         return self._halo_raw(a, b)
+
+    def _is_decap(self, ref):
+        return ref in self.decap_pins or any(c == ref for c, _n in self.decaps)
+
+    def _claimed_at(self, ref, chip):
+        """Does a claim put `ref` near `chip` (a termination at its pin, a cap
+        the schematic notes at a pin)?"""
+        c = getattr(self, '_claim_pairs', None)
+        if c is None:
+            c = self._claim_pairs = {(s, p) for s, p, _legs in self.claims}
+        return (ref, chip) in c
+
+    def _chip_pitch(self, chip):
+        p = getattr(self, '_pitches', None)
+        if p is None:
+            p = self._pitches = {}
+        if chip not in p:
+            part = self.state.parts[chip]
+            p[chip] = pad_pitch([(x - part.x, y - part.y) for x, y, _n in part.pad_globals()])
+        return p[chip]
+
+    def _wired_halo(self, small, chip):
+        """The halo of a small part wired to a fine-pitch chip by a signal (a
+        pull-up, a series resistor -- a decap is priced in its cluster): it
+        may touch the chip in front of the pins it is wired to, on a side
+        where it faces one and within a pitch (and FAN_MM) of it along that
+        side; anywhere else in the chip's halo -- in front of the chip's other
+        pins, on another side -- it leaves the fan-out room like any part.
+        Exempt everywhere, such parts sat in front of a QFP's and a QFN's
+        OTHER pins, 0.6-0.8 mm from them, and left those pins no way out (a
+        0.5 mm pitch passes no track between two pads)."""
+        st = self.state
+        ps, pc = st.parts[small], st.parts[chip]
+        pg = pc.pad_globals()
+        # its own pins: those of a net that reaches ONE pin of the chip (a
+        # pull-up's or a series resistor's signal); a supply reaches several,
+        # and a pull-up's +3V3 leg would otherwise own every supply pin
+        on_chip = {}
+        for _x, _y, n in pg:
+            on_chip[n] = on_chip.get(n, 0) + 1
+        nets = {n for n in set(ps.nets) & self.signal if on_chip.get(n) == 1}
+        xs, ys = [q[0] for q in pg], [q[1] for q in pg]
+        cx, cy = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+        hw, hh = (max(xs) - min(xs)) / 2.0, (max(ys) - min(ys)) / 2.0
+        w = self._chip_pitch(chip) + FAN_MM
+        r = ps.rect()
+        free = set()
+        for x, y, n in pg:
+            if n not in nets:
+                continue
+            u = (x - cx) / hw if hw >= 0.05 else 0.0
+            v = (y - cy) / hh if hh >= 0.05 else 0.0
+            if max(abs(u), abs(v)) < 0.5:
+                continue        # an exposed pad: no side
+            sides = []
+            if abs(u) >= abs(v) - 0.05:
+                sides.append(0 if u < 0 else 1)
+            if abs(v) >= abs(u) - 0.05:
+                sides.append(2 if v < 0 else 3)
+            for s in sides:
+                # W/E fronts span y, N/S fronts span x
+                lo, hi, c = (r[1], r[3], y) if s < 2 else (r[0], r[2], x)
+                if c - w - 1e-6 <= lo and hi <= c + w + 1e-6:
+                    free.add(s)
+        return self._halo_raw(small, chip, drop_b=frozenset(free))
 
     def _halo_raw(self, a, b, drop_b=frozenset()):
         """`halo_pair` without the small-wired exemption, `b`'s fronts on
