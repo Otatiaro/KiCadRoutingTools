@@ -1147,6 +1147,9 @@ def route_single_ended_nets(
                     # while-form so the slot-0 guard can re-run N=1 once with
                     # a promoted pick (audit, structural fix).
                     slot0_guard_used = False
+                    # (side, iterations before, after) when the first rip
+                    # enlarged the drained side's search (pocket-rip mode).
+                    slot0_grew = None
                     N = 0
                     while N < config.max_rip_up_count:
                         N += 1
@@ -1183,7 +1186,20 @@ def route_single_ended_nets(
                             # If the singleton just failed and the re-analysis
                             # names a DIFFERENT top pick, restore the refuted
                             # rip and try the fresh pick ALONE once before
-                            # extending to pairs.
+                            # extending to pairs. Not when, in pocket-rip
+                            # mode, that rip ENLARGED the drained side's
+                            # search: a bystander leaves the pocket exactly as
+                            # it was, so a first pick that grew it took down
+                            # one of its walls, and the fresh pick is the NEXT
+                            # wall -- ripped with it, not instead of it.
+                            if (N == 2 and slot0_grew is not None
+                                    and not slot0_guard_used
+                                    and len(ripped_items) == 1):
+                                slot0_guard_used = True
+                                print(f"  Slot-0 guard: {rippable_blockers[0].net_name}'s rip "
+                                      f"grew the {slot0_grew[0]} pocket "
+                                      f"({slot0_grew[1]} -> {slot0_grew[2]} iterations) -- "
+                                      f"kept, extending with {next_blocker.net_name}")
                             if (N == 2 and not slot0_guard_used
                                     and len(ripped_items) == 1
                                     and next_blocker.net_id in routed_results):
@@ -1641,6 +1657,13 @@ def route_single_ended_nets(
                                 # encloses it.
                                 _fi = retry_result.get('iterations_forward', 0)
                                 _bi = retry_result.get('iterations_backward', 0)
+                                _dir0 = locals().get('fastest_dir')
+                                if (env_knobs.POCKET_RIP and N == 1
+                                        and not slot0_guard_used and _dir0
+                                        and 0 < dir_iters < config.max_probe_iterations):
+                                    _after = _fi if _dir0 == 'forward' else _bi
+                                    if _after > dir_iters:
+                                        slot0_grew = (_dir0, dir_iters, _after)
                                 _stuck = None
                                 if env_knobs.POCKET_RIP and _fi > 0 and _bi > 0:
                                     if _fi <= _bi * 0.2 and retry_fwd_cells:
