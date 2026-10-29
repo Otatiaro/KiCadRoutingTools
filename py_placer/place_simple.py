@@ -297,6 +297,8 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
                   decap_weight=args.decap_weight, group_weight=args.group_weight,
                   hints=hints(doc, state, movable, args),
                   halo_coef=args.halo_coef, halo_weight=args.halo_weight,
+                  net_weights=(_class_weights(board, pcb) if getattr(args, 'halo_by_class', False)
+                               else None),
                   claim_limits=limits, claim_limit_weight=args.claim_limit_weight,
                   templates=tmpls, template_weight=args.template_weight)
     model.claim_arity = model_arity
@@ -457,6 +459,30 @@ def _seed_list(spec):
             out += list(range(int(lo), int(hi) + 1))
         elif part:
             out.append(int(part))
+    return out
+
+
+def _class_weights(board, pcb):
+    """{net id: its class's track + clearance over the Default class's}, for the
+    nets of a class wider than Default (`--halo-by-class`): read from the
+    board's .kicad_pro as the router reads it. Empty without net classes."""
+    from list_nets import read_design_rules, resolve_net_class
+    rules = read_design_rules(board)
+    classes = rules.get('classes') or {}
+
+    def pitch(cname):
+        c = classes.get(cname) or {}
+        tw, cl = c.get('track_width'), c.get('clearance')
+        return (tw + cl) if isinstance(tw, (int, float)) and isinstance(cl, (int, float)) else None
+    base = pitch('Default')
+    if not base:
+        return {}
+    out = {}
+    for nid, net in pcb.nets.items():
+        if net.name:
+            p = pitch(resolve_net_class(net.name, rules))
+            if p and p > base + 1e-9:
+                out[nid] = p / base
     return out
 
 
@@ -773,6 +799,9 @@ def build_parser():
                     help='mm of halo per net leaving by a side (default 0.25)')
     ap.add_argument('--halo-weight', type=float, default=10.0,
                     help='cost per mm^2 of a halo shortfall (default 10)')
+    ap.add_argument('--halo-by-class', action='store_true',
+                    help="a halo's depth counts each net by its class's track + clearance over the "
+                         "Default class's (an Ethernet pair needs about twice a default track's room)")
     ap.add_argument('--rail-weight', type=float, default=0.3,
                     help='per mm of a supply rail\'s tree: less than a signal\'s 1, '
                          'being wide or poured, but not nothing (default 0.3)')

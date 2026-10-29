@@ -143,7 +143,7 @@ def pad_pitch(offs: Sequence[Tuple[float, float]]) -> float:
 
 
 def pad_fronts(pads: Sequence[Tuple[float, float, int]], coef: float,
-               skip=frozenset()):
+               skip=frozenset(), weights=None):
     """The sides of a part its pads face, from its pads' `(dx, dy, net)`,
     offsets from the part's origin in the board frame: for W, E, N, S (-x,
     +x, -y, +y), `(h, lo, hi)` -- the halo depth in front of that side,
@@ -160,7 +160,12 @@ def pad_fronts(pads: Sequence[Tuple[float, float, int]], coef: float,
     half (an exposed pad, an inner ball) faces nothing. A corner pad faces
     the side whose line of pads (its row or column) is longer, both on a
     tie. A single line of three or more pads (a pin header) faces both
-    sides across the line."""
+    sides across the line.
+
+    `weights` {net: factor}, when given, counts a net as that many tracks: a
+    net whose class routes wider (an Ethernet pair at 0.2 mm with 0.15 mm
+    clearance against the default 0.09 / 0.09) needs that much more depth to
+    fan out."""
     eps = 0.05
     face: List[List[Tuple[float, float, int]]] = [[], [], [], []]
     if pads:
@@ -196,7 +201,8 @@ def pad_fronts(pads: Sequence[Tuple[float, float, int]], coef: float,
             out.append(None)
             continue
         along = [q[1] for q in f] if k < 2 else [q[0] for q in f]
-        out.append((coef * len(nets), min(along) - FAN_MM, max(along) + FAN_MM))
+        depth = coef * (sum(weights.get(n, 1.0) for n in nets) if weights else len(nets))
+        out.append((depth, min(along) - FAN_MM, max(along) + FAN_MM))
     return tuple(out)
 
 
@@ -378,6 +384,7 @@ class Model:
                  track_pitch: float = 0.33, cell: float = 0.5,
                  congestion_nets=None, congestion_layers=None, rail_weight: float = 0.0,
                  density_weight: float = 0.0, density_cell: float = 5.0, density_ratio: float = 1.5,
+                 net_weights=None,
                  ground_nets=(), ground_weight: float = 0.0, pad_weight: float = 0.0,
                  hints: Sequence[Dict] = (), halo_coef: float = 0.25,
                  halo_weight: float = 10.0, claim_limits: Sequence = (),
@@ -385,6 +392,9 @@ class Model:
                  template_weight: float = 0.0):
         self.state, self.pcb = state, pcb
         self.halo_coef, self.halo_weight = halo_coef, halo_weight
+        # {net id: tracks one of its tracks counts for in a halo}, by its class's
+        # track + clearance over the default class's (`pad_fronts`); None: one each
+        self.net_weights = net_weights
         self.hints = [h for h in hints if h['weight'] > 0]
         self.inner = tuple(state.usable)
         self.cw, self.kw, self.dw, self.gw = (crossing_weight, claim_weight,
@@ -972,7 +982,7 @@ class Model:
         if fr is None:
             fr = self._fr[key] = pad_fronts(
                 [(x - part.x, y - part.y, n) for x, y, n in part.pad_globals()],
-                self.halo_coef, self.ground)
+                self.halo_coef, self.ground, self.net_weights)
         return fr
 
     def halo_pair(self, a, b):
