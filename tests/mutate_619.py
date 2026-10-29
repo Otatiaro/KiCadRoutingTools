@@ -49,14 +49,16 @@ ROWS = [
     # count to zero, and only a control that asserts a NON-blocker stays
     # non-blocking can tell "correct" from "refuses everything".
     ('over-strict-floor-x5', 'q',
-     "                        < v.size / 2 + track_width / 2 + _stub_clr - 1e-6:",
-     "                        < 5.0 * (v.size / 2 + track_width / 2 + _stub_clr):",
+     "                        < v.size / 2 + track_width / 2 \\\n"
+     "                        + _vcl(v.size, v.drill, _stub_clr) - 1e-6:",
+     "                        < 5.0 * (v.size / 2 + track_width / 2\n"
+     "                                 + _vcl(v.size, v.drill, _stub_clr)):",
      (T_619,), 'KILLED'),
     ('via-floor-uses-drill-not-size', 'q',
      "                if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \\\n"
-     "                        < v.size / 2 + track_width / 2 + _stub_clr - 1e-6:",
+     "                        < v.size / 2 + track_width / 2 \\",
      "                if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \\\n"
-     "                        < v.drill / 2 + track_width / 2 + _stub_clr - 1e-6:",
+     "                        < v.drill / 2 + track_width / 2 \\",
      (T_619,), 'KILLED'),
 
     # ---- the guards ------------------------------------------------------
