@@ -19,9 +19,10 @@ Per CLI, a WITNESS run that narrows and a CONTROL run that does not:
     (`set_policy_from_args`, which resets the ledger). What is tested is the
     main's handling of a non-empty ledger -- the part that was missing.
     Controls: the same commands without the injection.
-  * route_diff: a real witness -- lvds_converter_dualclk's /DATA pair, where
-    the #318 partner neck takes two /DATA+ attach segments 0.3 -> 0.2799
-    against a ~10 um graze. That neck used to be in no ledger, so this
+  * route_diff: a real witness -- lvds_converter_dualclk's /CLK pair, where
+    the #318 partner neck takes two attach segments 0.3 -> 0.2799 against a
+    ~10 um graze (the /DATA pair, which did the same, now leaves its two
+    neighbouring pins along their axis and narrows nothing). That neck used to be in no ledger, so this
     command was the CONTROL and exited 0 while shipping them. The control is
     now cap_chain's two pairs, which narrow nothing, and the injected witness
     runs on that command.
@@ -143,8 +144,8 @@ def t_planes_and_diff(td):
     _witness(rep, _env(td, True), 'repair_planes (injected ledger row)')
     lv = _copy('lvds_converter_dualclk.kicad_pcb', td)
     _witness(PY + [tool('route_diff.py'), lv, '--output',
-                   os.path.join(td, 'diff_lv.kicad_pcb'), '--nets', '/DATA*'],
-             tool_env(), 'route_diff (#318 partner neck on /DATA+)')
+                   os.path.join(td, 'diff_lv.kicad_pcb'), '--nets', '/CLK*'],
+             tool_env(), 'route_diff (#318 partner neck on /CLK)')
     cc = _copy('cap_chain.kicad_pcb', td)
     diff = PY + [tool('route_diff.py'), cc, '--output',
                  os.path.join(td, 'diff.kicad_pcb'), '--nets', 'DP*']
