@@ -50,6 +50,8 @@ from collections import Counter
 from typing import Dict, List, Optional, Set, Tuple
 
 from kicad_parser import Footprint, PCBData
+from obstacle_map import resolve_hole_clearance
+from routing_defaults import NPTH_TO_TRACK_CLEARANCE
 from bga_fanout.types import BGAGrid
 from bga_fanout.geometry import clamp_via_to_pad, endpoint_on_pad
 from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
@@ -1135,6 +1137,15 @@ def generate_underpad_escape(footprint: Footprint,
     # stamp lose their exemption via _carve_foreign. The lists below mirror
     # exactly what gets stamped into occ (plus per-item radii and net ids).
     home_r = max(pad_keep, via_keep)
+    # Track copper to a bare hole's wall: the routing clearance, raised to the
+    # NPTH fab floor and to the board's own min_hole_clearance.
+    npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE,
+                   resolve_hole_clearance(pcb_data, None))
+
+    def _bare_hole(p):
+        return bool(p.drill and p.drill > 0) and (
+            p.pad_type == 'np_thru_hole' or max(p.size_x, p.size_y) < p.drill)
+
     _EMPTY = frozenset()
     layer_idx = {name: i for i, name in enumerate(layers)}
     exact_vias: List[Tuple] = []      # (x, y, ring_r, drill_r, net_id) - real vias
@@ -1153,8 +1164,17 @@ def generate_underpad_escape(footprint: Footprint,
     # EVERY footprint pad blocks copper - including unconnected (net 0) balls,
     # which still occupy F.Cu. SMD blocks only F.Cu; through-hole blocks all
     # layers. (Use footprint.pads, not the netted subset, or NC balls get clipped.)
+    # A hole with no copper round it (an NPTH, or a plated ring that does not
+    # cover its drill, #441) is held from track copper at the NPTH floor, as
+    # the routing map holds it (obstacle_map.add_drill_hole_obstacles): the
+    # ball-sized pad_keep left a TC2030's 2.37 mm alignment holes 0.07 mm from
+    # its escapes.
     for p in footprint.pads:
-        if p.drill and p.drill > 0:
+        if _bare_hole(p):
+            keep = p.drill / 2.0 + track_width / 2 + npth_clr + margin
+            occ.block_all(p.global_x, p.global_y, keep)
+            carve_disks.append((p.global_x, p.global_y, keep, None, p.net_id))
+        elif p.drill and p.drill > 0:
             occ.block_all(p.global_x, p.global_y, pad_keep)
             carve_disks.append((p.global_x, p.global_y, pad_keep, None, p.net_id))
         else:
@@ -1242,6 +1262,8 @@ def generate_underpad_escape(footprint: Footprint,
             continue
         p_extra = _ovr_extra(p)                     # #1317
         p_keep = p_half + track_width / 2 + clearance + margin + p_extra
+        if _bare_hole(p):                           # the NPTH floor, as above
+            p_keep = max(p_keep, p.drill / 2.0 + track_width / 2 + npth_clr + margin)
         if p.drill and p.drill > 0:
             occ.block_all(p.global_x, p.global_y, p_keep)
             carve_disks.append((p.global_x, p.global_y, p_keep, None, p.net_id))
@@ -2440,7 +2462,12 @@ def generate_underpad_escape(footprint: Footprint,
             if _pt_seg_d(ox, oy, gx, gy, vx, vy) < hw + orr + _vcl(orr, odr) - 1e-6:
                 return True
         for (px_, py_, half, pdr, pnid, has_cu) in ctx['pads']:
-            if not has_cu or pnid == net_id:
+            if not has_cu:
+                # an NPTH, whatever its net: the stub keeps the hole floor
+                if pdr and _pt_seg_d(px_, py_, gx, gy, vx, vy) < hw + pdr + npth_clr - 1e-6:
+                    return True
+                continue
+            if pnid == net_id:
                 continue
             if _pt_seg_d(px_, py_, gx, gy, vx, vy) < hw + half + clearance - 1e-6:
                 return True
@@ -3629,6 +3656,8 @@ def generate_underpad_escape(footprint: Footprint,
                 if _sok:
                     _sok = not any(has_cu and pnid != _sp.net_id
                                    and _pt_seg_d(px_, py_, _ax, _ay, _bx, _by) < _hw + half + clearance - 1e-6
+                                   or not has_cu and _pd
+                                   and _pt_seg_d(px_, py_, _ax, _ay, _bx, _by) < _hw + _pd + npth_clr - 1e-6
                                    for (px_, py_, half, _pd, pnid, has_cu) in exact_pads)
                 if _sok:
                     _sok = occ.seg_clear(_sli, (_ax, _ay), (_bx, _by),
