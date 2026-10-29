@@ -17,7 +17,8 @@ Rows (the geometry of that board, a via of net A at (54.8, 40.1)):
      shortcut): restored;
   3. B's track restored beside A's via, the same 0.194: refused;
   4. two vias, one restored, 0.18 mm hole to copper: refused; 0.25: restored;
-  5. no plated floor declared: the 0.194 case is restored, as before.
+  5. no plated floor declared: the 0.194 case is restored, as before;
+  6. copper exactly at the floor on grid rows: restored; 1 um inside: refused.
 
 Standalone:  python3 tests/test_restore_holds_hole_floor.py
 """
@@ -90,6 +91,17 @@ def main():
     print('5. no plated floor declared:')
     check('0.194 mm from the hole: restored, as before',
           restores({'new_vias': [via]}, [track(54.25)], 0.0))
+    print('6. copper exactly at the hole floor (grid rows on a 0.09 grid):')
+    for gy in (7, 445, 1193):
+        vx, vy = 63 * 0.09, gy * 0.09
+        v = make_via(vx, vy, net_id=A, size=0.45, drill=0.3)
+        ty = vy + 0.225 + (0.2 - 0.075) + 0.045    # via copper + floor - ring + half track
+        at = make_seg(vx - 1, ty, vx + 1, ty, net_id=B, width=0.09)
+        inside = make_seg(vx - 1, ty - 0.001, vx + 1, ty - 0.001, net_id=B, width=0.09)
+        check(f'row {gy}: at the floor restored',
+              restores({'new_vias': [v]}, [at], 0.2))
+        check(f'row {gy}: 1 um inside refused',
+              not restores({'new_vias': [v]}, [inside], 0.2))
     print()
     if fails:
         print(f'FAILED: {len(fails)} check(s): {fails}')

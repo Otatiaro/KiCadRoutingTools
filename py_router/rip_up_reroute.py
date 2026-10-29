@@ -504,9 +504,13 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     hc = getattr(config, 'plated_hole_clearance', 0.0) if config is not None else 0.0
 
     def _vclr(c, *vs):
+        # `c` comes from _clr, tie epsilon already off: the floor is taken on
+        # the true clearance and the epsilon taken off the result, so copper
+        # exactly at the hole floor is not refused either
         for v in vs:
             if hc > 0:
-                c = config.via_copper_clearance(c, v.size, getattr(v, 'drill', None))
+                c = config.via_copper_clearance(c + GRID_TIE_EPS, v.size,
+                                                getattr(v, 'drill', None)) - GRID_TIE_EPS
         return c
 
     # Bounding box of the saved route, expanded, to prefilter pcb_data copper.
