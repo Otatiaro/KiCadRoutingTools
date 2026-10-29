@@ -7,7 +7,8 @@ Rows:
   1. `static_boxin_hint` advises a clearance / track only when it is NARROWER
      than the run's: a run at 0.09 / 0.0762 gets the grid advice alone, a run
      at 0.2 / 0.2 is still offered 0.15 / 0.15.
-  2. The 4-layer rp2350 chain (rip ladder to N=5 on nets that stay blocked):
+  2. The 4-layer rp2350 chain (rip ladder to N=5 on nets that stay blocked;
+     backward search first, which keeps ladders failing in both sites):
      every "All rip-up attempts failed" is followed by an HONEST line -- the
      main pass's "ROUTE FAILED - ripping N blocker net(s) (...) did not free
      a path", or the phase-3 re-route's "RIP-RESTORE" of the victim -- never by
@@ -63,6 +64,7 @@ def main():
          '--track-width', '0.0762', '--clearance-ceiling', '0.09', '--via-size', '0.25',
          '--via-drill', '0.15', '--layers', 'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu',
          '--layer-costs', '1.0', '6.0', '2.5', '1.0', '--no-bga-zones', '--max-ripup', '5',
+         '--direction', 'backward',
          '--power-nets', 'GND', '+3V3', 'Net-(D2-K)', '/VIN', 'Net-(D2-A)', 'Net-(U7-SW)',
          '+1V1', '/RP2354A/1V1', 'Net-(U6-VREG_LX)', 'Net-(U6-VREG_AVDD)',
          '--power-nets-widths', '0.7', '0.7', '0.7', '0.7', '0.7', '0.7', '0.5', '0.5',

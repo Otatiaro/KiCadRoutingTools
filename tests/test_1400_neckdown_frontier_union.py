@@ -13,11 +13,15 @@ frontier only) named /PC-RST, ripped it and routed VCC.
 The chain: signal routing of everything but VCC/GND, the /PC-RST wall staged
 over VCC's finger (check_join --keep-staged), VCC/GND routed once at 0.2 to
 leave VCC's finger tap open, then again at 0.7 with the rescue ladder off.
+The wall also runs down the gaps on both sides of the finger: when the
+signals beside it land on their own fingers along the axis, the gaps are
+free on F.Cu and a narrow VCC dropped a via into one, under the wall.
 
 Rows:
   1. `_union_frontier_cells` keeps the first list's order and adds only the
      second's new cells.
-  2. At 0.7 the neck-down retry fails and the cascade names and rips /PC-RST.
+  2. At 0.7 the neck-down retry fails and the cascade names and rips /PC-RST
+     (alone, or after a finger-side net it tried first).
   3. VCC ends connected (no open pad pairs), as at 0.2.
 
     python3 tests/test_1400_neckdown_frontier_union.py      (about 2 min)
@@ -68,6 +72,8 @@ def main():
     try:
         src = os.path.join(ROOT, 'kicad_files', 'interf_u_unrouted_placed.kicad_pcb')
         sig = os.path.join(tmp, 'sig.kicad_pcb')
+        wall0 = os.path.join(tmp, 'wall0.kicad_pcb')
+        wall1 = os.path.join(tmp, 'wall1.kicad_pcb')
         wall = os.path.join(tmp, 'wall.kicad_pcb')
         opened = os.path.join(tmp, 'open.kicad_pcb')
         w07 = os.path.join(tmp, 'w07.kicad_pcb')
@@ -75,7 +81,12 @@ def main():
             '--via-cost', '150')
         run('py_tools/check_join.py', sig, '/PC-RST', '163.4,132.1,B.Cu',
             '162.4,133.1,B.Cu', '162.4,134.2,B.Cu', '165.6,134.2,B.Cu', '167.0,135.6,B.Cu',
-            '--width', '0.2', '--keep-staged', wall, '-q')
+            '--width', '0.2', '--keep-staged', wall0, '-q')
+        # Down the gaps left and right of the finger, from the wall above it.
+        run('py_tools/check_join.py', wall0, '/PC-RST', '163.2,134.2,B.Cu',
+            '163.2,141.8,B.Cu', '--width', '0.2', '--keep-staged', wall1, '-q')
+        run('py_tools/check_join.py', wall1, '/PC-RST', '165.73,134.33,B.Cu',
+            '165.73,141.8,B.Cu', '--width', '0.2', '--keep-staged', wall, '-q')
         if not os.path.isfile(wall):
             check('0. the wall board was staged', False)
             return 1
@@ -91,7 +102,8 @@ def main():
                   '--power-nets-widths', '0.7', '0.7', env={'KICAD_NET_RESCUE': '0'})
         check('2. the wide attempt fails and the neck-down retry runs',
               'Wide route blocked - retrying at default track width (neck-down)' in log)
-        check('2. the cascade names and rips /PC-RST', 'Ripping /PC-RST' in log)
+        check('2. the cascade names and rips /PC-RST',
+              re.search(r'[Rr]ipping /PC-RST \(net', log) is not None)
         m = re.findall(r'"pad_pairs_open": (\{[^}]*\})', log)
         check('3. VCC ends connected', bool(m) and '"count": 0' in m[-1],
               m[-1] if m else 'no pad_pairs_open')
