@@ -1,0 +1,63 @@
+{
+  "board": {
+    "design_settings": {
+      "rules": {
+        "min_clearance": 0.127,
+        "min_hole_clearance": 0.127,
+        "min_hole_to_hole": 0.2,
+        "min_copper_edge_clearance": 0.2,
+        "min_track_width": 0.127,
+        "min_via_diameter": 0.25,
+        "min_through_hole_diameter": 0.15,
+        "min_via_drill": 0.15,
+        "min_via_annular_width": 0.05
+      },
+      "rule_severities": {}
+    }
+  },
+  "meta": {
+    "filename": "interf_u_signals.kicad_pro",
+    "version": 1
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "bus_width": 12,
+        "clearance": 0.127,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.2,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.2,
+        "name": "Default",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 2147483647,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      }
+    ],
+    "meta": {
+      "version": 0
+    }
+  },
+  "kicad_routing_tools": {
+    "repo_rules": {
+      "min_via_drill": 0.15
+    },
+    "class_clearance_relaxed": {
+      "from": 0.25,
+      "to": 0.127,
+      "nets": [
+        "/PC-A5",
+        "/PC-A9",
+        "/REF5",
+        "/REF7"
+      ]
+    },
+    "records_rev": 1
+  }
+}
