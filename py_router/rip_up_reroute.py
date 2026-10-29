@@ -19,6 +19,7 @@ from obstacle_costs import compute_track_proximity_for_net, compute_ripped_route
 from obstacle_cache import (
     precompute_net_obstacles, add_net_obstacles_from_cache, remove_net_obstacles_from_cache
 )
+from routing_utils import GRID_TIE_EPS
 
 # Debug knob, read ONCE: no per-rip environ lookup when it is off.
 _RIP_CALLER_DEBUG = os.environ.get('KICAD_RIP_CALLER') == '1'
@@ -477,6 +478,14 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     inp_ids = _inp[0] if _inp else frozenset()
 
     def _clr(own_net, o, layer, kind):
+        # Copper exactly AT the clearance is legal, as KiCad grades it; the
+        # tie epsilon keeps float noise from reading it as a graze. A grid
+        # whose step divides track + clearance (0.09 for 0.09/0.09) lays
+        # neighbours at exactly that gap, so without it nearly every restore
+        # beside a neighbour was refused and the net left ripped.
+        return _pair_clr(own_net, o, layer, kind) - GRID_TIE_EPS
+
+    def _pair_clr(own_net, o, layer, kind):
         if not pairwise:
             return clearance
         c = config.pair_clearance(own_net, o.net_id, layer, kind=kind,
