@@ -24,7 +24,7 @@ from routing_context import (build_single_ended_obstacles, build_incremental_obs
 from single_ended_routing import (route_multipoint_taps, route_net_with_obstacles,
                                   route_multipoint_main, uncommit_dropped_result)
 from connectivity import get_multipoint_net_pads, get_copper_connected_terminal_groups
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking, place_blocker_at_rung
 from protected_nets import rip_refusal
 from rip_up_reroute import rip_up_net, restore_net
 from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
@@ -876,6 +876,87 @@ def run_phase3_tap_routing(
     return stats
 
 
+def _tap_attribution_entries(failed_edge_blocking, probe_iterations):
+    """(cells to attribute, target xy, flood cells or None) per failed tap edge.
+
+    Direction-separated (audit #2ii): when both directions reported walls,
+    one side's frontier is the walled-in pad's pocket and the other a broad
+    flood that swamps it. The pocket is the side whose search DRAINED --
+    stopped below the probe limit while the other ran on -- the signature the
+    victim ladder and the SE loop read from the iteration counts; the other
+    side's cells come back as the edge's flood. Without that signature (both
+    drained, neither did, no counts) the side with fewer cells stands in for
+    the pocket and no flood is returned. The synthetic via-conflict cells
+    ride along either way.
+    """
+    entries = []
+    for entry in failed_edge_blocking.values():
+        cells, tgt_xy, flood = entry[0], entry[1], None
+        dirs = entry[2] if len(entry) > 2 else None
+        if dirs:
+            fwd, bwd = dirs.get('fwd') or [], dirs.get('bwd') or []
+            if fwd and bwd:
+                f_it, b_it = dirs.get('iters') or (0, 0)
+                f_drained = 0 < f_it < probe_iterations
+                b_drained = 0 < b_it < probe_iterations
+                if f_drained != b_drained:
+                    side, flood = (fwd, bwd) if f_drained else (bwd, fwd)
+                else:
+                    side = fwd if len(fwd) <= len(bwd) else bwd
+                cells = list(side) + list(dirs.get('extra') or [])
+        entries.append((cells, tgt_xy, flood))
+    return entries
+
+
+def _rank_tap_blockers(edge_entries, pcb_data, config, routed_net_paths,
+                       exclude_ids, obstacle_cache, known=None):
+    """Blockers of the failed tap edges, ranked for the rip ladder.
+
+    PER-EDGE attribution (audit #2i): three tap edges failing in three
+    corners used to become one merged cell soup ranked by whichever net had
+    the most total perimeter -- possibly relevant to none of them. Each edge
+    is attributed against ITS OWN target, then merged per net by MAX so the
+    net decisive at one edge isn't diluted by the others. `known` lists
+    validator-named blockers (apply_known_blockers).
+
+    A pocket's walls are not all equal: the one between the pocket and the
+    rest of the net is also met by the edge's flood (the other direction's
+    search), while a wall with dead ground behind it is not. Of two walls the
+    pocket counts cannot tell apart, the separating one is ripped first:
+    the walls the flood also meets move ahead of the others, keeping the
+    ranking within each group (validator-named blockers stay first)."""
+    from blocking_analysis import (BlockingReport, apply_known_blockers,
+                                   merge_blocking_max, rank_blockers,
+                                   nets_meeting_cells)
+    if obstacle_cache is None:
+        obstacle_cache = {}        # nets_meeting_cells reads the cells from it
+    merged = {}
+    met_by_flood = set()
+    frontier = attributed = 0
+    for cells, tgt, flood in edge_entries:
+        report = analyze_frontier_blocking(
+            cells, pcb_data, config, routed_net_paths,
+            exclude_net_ids=exclude_ids, target_xy=tgt,
+            obstacle_cache=obstacle_cache)
+        frontier += getattr(report, 'frontier_cells', 0)
+        attributed += getattr(report, 'attributed_cells', 0)
+        for b in report:
+            m = merged.get(b.net_id)
+            merged[b.net_id] = b if m is None else merge_blocking_max(m, b)
+        if flood and report:
+            met_by_flood |= nets_meeting_cells(
+                [b.net_id for b in report], flood, obstacle_cache)
+    blockers = BlockingReport(merged.values())
+    blockers.frontier_cells, blockers.attributed_cells = frontier, attributed
+    apply_known_blockers(blockers, known, exclude_ids, pcb_data)
+    rank_blockers(blockers, getattr(config, 'ripup_blocker_select', 'count'),
+                  config=config, pcb_data=pcb_data)
+    if met_by_flood:
+        blockers.sort(key=lambda b: (not getattr(b, 'validator_named', False),
+                                     b.net_id not in met_by_flood))
+    return blockers
+
+
 def try_phase3_ripup(
     net_id, completed_result, failed_edge_blocking, lm_segments, lm_vias,
     pcb_data, config, state, routed_net_ids, remaining_net_ids,
@@ -908,26 +989,10 @@ def try_phase3_ripup(
     # pad-hugging track, and the #424 synthetic conflict cells, under
     # thousands of far-wall cells).
     all_blocked_cells = []
-    _tgt_for_rank = None
-    _edge_entries = []  # (cells_for_attribution, tgt_xy) per failed edge
-    for edge_key, entry in failed_edge_blocking.items():
-        blocked_cells, tgt_xy = entry[0], entry[1]
-        all_blocked_cells.extend(blocked_cells)
-        if _tgt_for_rank is None:
-            _tgt_for_rank = tgt_xy
-        # Direction-separated attribution (audit #2ii): when both probe
-        # directions reported walls, the TIGHTER side is the drained-pocket
-        # perimeter (the walled-in pad's wall, hugging track included); the
-        # broad side is the far flood that used to swamp it. The synthetic
-        # via-conflict cells ride along either way.
-        cells = blocked_cells
-        dirs = entry[2] if len(entry) > 2 else None
-        if dirs:
-            fwd, bwd = dirs.get('fwd') or [], dirs.get('bwd') or []
-            if fwd and bwd:
-                side = fwd if len(fwd) <= len(bwd) else bwd
-                cells = list(side) + list(dirs.get('extra') or [])
-        _edge_entries.append((cells, tgt_xy))
+    for entry in failed_edge_blocking.values():
+        all_blocked_cells.extend(entry[0])
+    _edge_entries = _tap_attribution_entries(failed_edge_blocking,
+                                             config.max_probe_iterations)
 
     if not all_blocked_cells:
         return None
@@ -970,26 +1035,9 @@ def try_phase3_ripup(
     _known_ids = _blame_ids - exclude_ids
     _known = [(nid, 1) for nid in sorted(_known_ids)] or None
 
-    # PER-EDGE attribution (audit #2i): three tap edges failing in three
-    # corners used to become one merged cell soup ranked by whichever net
-    # had the most total perimeter -- possibly relevant to none of them.
-    # Attribute each edge against ITS OWN target, then merge per net by MAX
-    # so the net decisive at one edge isn't diluted by the others.
-    from blocking_analysis import (apply_known_blockers, merge_blocking_max,
-                                   rank_blockers)
-    _merged = {}
-    for _cells, _tgt in _edge_entries:
-        for b in analyze_frontier_blocking(
-                _cells, pcb_data, config, routed_net_paths,
-                exclude_net_ids=exclude_ids,
-                target_xy=_tgt,
-                obstacle_cache=obstacle_cache):
-            m = _merged.get(b.net_id)
-            _merged[b.net_id] = b if m is None else merge_blocking_max(m, b)
-    blockers = list(_merged.values())
-    apply_known_blockers(blockers, _known, exclude_ids, pcb_data)
-    rank_blockers(blockers, getattr(config, 'ripup_blocker_select', 'count'),
-                  config=config, pcb_data=pcb_data)
+    blockers = _rank_tap_blockers(_edge_entries, pcb_data, config,
+                                  routed_net_paths, exclude_ids,
+                                  obstacle_cache, known=_known)
     record_frontier_blocking(state, net_id, blockers, "phase3")
 
     if not blockers:
@@ -1032,18 +1080,18 @@ def try_phase3_ripup(
     ripped_items = []  # Track nets ripped in this attempt
     ripped_canonical_ids = set()
     last_retry_blocked_cells = all_blocked_cells
+    last_retry_entries = _edge_entries
     original_failed_count = completed_result.get('tap_edges_failed', 0)
 
     for N in range(1, config.max_rip_up_count + 1):
-        # For N > 1, re-analyze from the last retry's blocked cells
+        # For N > 1, re-analyze the last retry's failed edges the way the
+        # first pick was made: per edge, on the drained side.
         if N > 1 and last_retry_blocked_cells:
-            print(f"    Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
-            fresh_blockers = analyze_frontier_blocking(
-                last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                exclude_net_ids=exclude_ids,
-                target_xy=_tgt_for_rank,
-                obstacle_cache=obstacle_cache
-            )
+            print(f"    Re-analyzing {sum(len(e[0]) for e in last_retry_entries)} "
+                  f"blocked cells from N={N-1} retry:")
+            fresh_blockers = _rank_tap_blockers(
+                last_retry_entries, pcb_data, config, routed_net_paths,
+                exclude_ids, obstacle_cache)
             record_frontier_blocking(state, net_id, fresh_blockers, "phase3")
             print_blocking_analysis(fresh_blockers, prefix="      ")
 
@@ -1062,11 +1110,9 @@ def try_phase3_ripup(
                 print(f"    No additional rippable blockers from retry analysis")
                 break
 
-            # Add to rippable list if not already there
-            next_canonical = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
-            if next_canonical not in seen_canonical_ids:
-                seen_canonical_ids.add(next_canonical)
-                rippable_blockers.append(next_blocker)
+            place_blocker_at_rung(rippable_blockers, seen_canonical_ids,
+                                  next_blocker, N, diff_pair_by_net_id,
+                                  get_canonical_net_id)
 
         if N > len(rippable_blockers):
             break  # Not enough blockers to rip
@@ -1087,7 +1133,7 @@ def try_phase3_ripup(
         # multi-tap nets. Cells: the retry's own blocked cells at N>1, else the
         # union of this edge's frontier cells.
         _lr_cells = (last_retry_blocked_cells if (N > 1 and last_retry_blocked_cells)
-                     else [c for _cells, _t in _edge_entries for c in _cells])
+                     else [c for _cells, _t, _f in _edge_entries for c in _cells])
         _only = None
         if LEG_RIP_ENABLED and blocker.net_id not in diff_pair_by_net_id:
             _only = select_blocking_branch(pcb_data, blocker.net_id, _lr_cells,
@@ -1383,6 +1429,8 @@ def try_phase3_ripup(
                     last_retry_blocked_cells = []
                     for edge_key, entry in retry_blocking.items():
                         last_retry_blocked_cells.extend(entry[0])
+                    last_retry_entries = _tap_attribution_entries(
+                        retry_blocking, config.max_probe_iterations)
                     if last_retry_blocked_cells:
                         print(f"      Retry had {len(last_retry_blocked_cells)} blocked cells")
         else:
@@ -1537,10 +1585,9 @@ def _retry_victim_main_with_ripup(
                         break
             if next_blocker is None:
                 break
-            next_canonical = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
-            if next_canonical not in seen_canonical_ids:
-                seen_canonical_ids.add(next_canonical)
-                rippable_blockers.append(next_blocker)
+            place_blocker_at_rung(rippable_blockers, seen_canonical_ids,
+                                  next_blocker, N, diff_pair_by_net_id,
+                                  get_canonical_net_id)
         if N > len(rippable_blockers):
             break
 
