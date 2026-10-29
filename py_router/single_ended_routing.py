@@ -340,30 +340,21 @@ def _seg_inner_rect_dist(ax, ay, bx, by, a, b):
     box's own frame), 0 where the segment meets the box. Two disjoint convex
     polygons are nearest at a vertex of one of them, so outside the box the
     distance is the least of the two endpoint-to-box distances and the four
-    corner-to-segment distances; a slab test finds the segments that meet it."""
-    def _pt_box(px, py):
-        return np.hypot(np.maximum(np.abs(px) - a, 0.0), np.maximum(np.abs(py) - b, 0.0))
-    d = np.minimum(_pt_box(ax, ay), _pt_box(bx, by))
+    corner-to-segment distances; the separating-axis test (the box's two axes
+    and the segment's normal) finds the segments that meet it."""
+    ex = np.stack((ax, bx))
+    ey = np.stack((ay, by))
+    d = np.hypot(np.maximum(np.abs(ex) - a, 0.0), np.maximum(np.abs(ey) - b, 0.0)).min(axis=0)
     ux, uy = bx - ax, by - ay
     L2 = ux * ux + uy * uy
-    safe_L2 = np.where(L2 > 0.0, L2, 1.0)
-    for qx, qy in ((a, b), (a, -b), (-a, b), (-a, -b)):
-        t = np.where(L2 > 0.0, np.clip(((qx - ax) * ux + (qy - ay) * uy) / safe_L2, 0.0, 1.0), 0.0)
-        d = np.minimum(d, np.hypot(qx - (ax + t * ux), qy - (ay + t * uy)))
-    # slab test on [0, 1]; an axis the segment does not move along meets the
-    # slab entirely or not at all
-    t0 = np.zeros_like(ax)
-    t1 = np.ones_like(ax)
-    meets = np.ones(ax.shape, dtype=bool)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        for p, u, h in ((ax, ux, a), (ay, uy, b)):
-            flat = u == 0.0
-            meets &= ~flat | (np.abs(p) <= h)
-            su = np.where(flat, 1.0, u)
-            ta, tb = (-h - p) / su, (h - p) / su
-            t0 = np.where(flat, t0, np.maximum(t0, np.minimum(ta, tb)))
-            t1 = np.where(flat, t1, np.minimum(t1, np.maximum(ta, tb)))
-    meets &= t0 <= t1
+    # the four corners at once, (4, M)
+    qx = np.stack((a, a, -a, -a))
+    qy = np.stack((b, -b, b, -b))
+    t = np.clip(((qx - ax) * ux + (qy - ay) * uy) / np.where(L2 > 0.0, L2, 1.0), 0.0, 1.0)
+    d = np.minimum(d, np.hypot(qx - (ax + t * ux), qy - (ay + t * uy)).min(axis=0))
+    meets = ((np.minimum(ax, bx) <= a) & (np.maximum(ax, bx) >= -a)
+             & (np.minimum(ay, by) <= b) & (np.maximum(ay, by) >= -b)
+             & (np.abs(ux * ay - uy * ax) <= np.abs(uy) * a + np.abs(ux) * b))
     return np.where(meets, 0.0, d)
 
 
