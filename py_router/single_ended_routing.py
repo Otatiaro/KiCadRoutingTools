@@ -276,6 +276,112 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
     return best
 
 
+def _custom_pad_seg_dist(custom, net_id, x1, y1, x2, y2, base_clearance=None,
+                         net_clearances=None):
+    """Exact min edge distance from the segment (x1, y1)-(x2, y2) to the CUSTOM
+    pads of other nets: check_drc.segment_pad_gap on the pad's real polygons, 0
+    where the segment enters one. The segment twin of _custom_pad_min_dist, with
+    its window (a pad counts when some point of the segment lies within its
+    bbox + _FOREIGN_PAD_WINDOW) and its local-clearance / #436 class excess."""
+    if not custom:
+        return 1e9
+    from check_drc import segment_pad_gap
+    R = _FOREIGN_PAD_WINDOW
+    sx0, sx1 = min(x1, x2), max(x1, x2)
+    sy0, sy1 = min(y1, y2), max(y1, y2)
+    cand = []
+    for nid, pad in custom:
+        if nid == net_id:
+            continue
+        ex = pad.size_x / 2.0
+        ey = pad.size_y / 2.0
+        if not _seg_meets_box(x1, y1, x2, y2, pad.global_x - R - ex, pad.global_y - R - ey,
+                              pad.global_x + R + ex, pad.global_y + R + ey):
+            continue
+        adj = 0.0
+        if base_clearance is not None:
+            adj = max((getattr(pad, 'local_clearance', 0.0) or 0.0) - base_clearance, 0.0)
+            if net_clearances:
+                adj = max(adj, net_clearances.get(nid, base_clearance)
+                          - base_clearance)
+        bb = _custom_pad_bbox(pad)
+        # the gap between the segment's bbox and the polygons' bbox bounds the
+        # distance from below
+        lo = math.hypot(max(bb[0] - sx1, sx0 - bb[2], 0.0),
+                        max(bb[1] - sy1, sy0 - bb[3], 0.0))
+        cand.append((lo - adj, adj, pad))
+    cand.sort(key=lambda c: c[0])
+    best = 1e9
+    for lo, adj, pad in cand:
+        if lo >= best:
+            break
+        d = segment_pad_gap(x1, y1, x2, y2, pad) - adj
+        if d < best:
+            best = d
+    return best
+
+
+def _custom_pad_bbox(pad):
+    """Global bbox of a custom pad's polygons (its size box without them),
+    memoized on the pad as _custom_pad_min_dist does."""
+    bb = getattr(pad, '_poly_bbox', None)
+    if bb is None:
+        vs = [v for poly in (getattr(pad, 'polygons', None) or ()) for v in poly]
+        if vs:
+            bb = (min(v[0] for v in vs), min(v[1] for v in vs),
+                  max(v[0] for v in vs), max(v[1] for v in vs))
+        else:
+            ex, ey = pad.size_x / 2.0, pad.size_y / 2.0
+            bb = (pad.global_x - ex, pad.global_y - ey,
+                  pad.global_x + ex, pad.global_y + ey)
+        try:
+            pad._poly_bbox = bb
+        except Exception:
+            pass
+    return bb
+
+
+def _seg_meets_box(x1, y1, x2, y2, bx0, by0, bx1, by1):
+    """True when the segment (x1, y1)-(x2, y2) has a point in the closed box."""
+    t0, t1 = 0.0, 1.0
+    for p, d, lo, hi in ((x1, x2 - x1, bx0, bx1), (y1, y2 - y1, by0, by1)):
+        if d == 0.0:
+            if p < lo or p > hi:
+                return False
+            continue
+        a, b = (lo - p) / d, (hi - p) / d
+        if a > b:
+            a, b = b, a
+        t0, t1 = max(t0, a), min(t1, b)
+        if t0 > t1:
+            return False
+    return True
+
+
+def _seg_inner_rect_dist(ax, ay, bx, by, a, b):
+    """Exact distance from each segment (ax, ay)-(bx, by) to the box
+    [-a, a] x [-b, b] (numpy arrays, one segment and box per element, in the
+    box's own frame), 0 where the segment meets the box. Two disjoint convex
+    polygons are nearest at a vertex of one of them, so outside the box the
+    distance is the least of the two endpoint-to-box distances and the four
+    corner-to-segment distances; the separating-axis test (the box's two axes
+    and the segment's normal) finds the segments that meet it."""
+    ex = np.stack((ax, bx))
+    ey = np.stack((ay, by))
+    d = np.hypot(np.maximum(np.abs(ex) - a, 0.0), np.maximum(np.abs(ey) - b, 0.0)).min(axis=0)
+    ux, uy = bx - ax, by - ay
+    L2 = ux * ux + uy * uy
+    # the four corners at once, (4, M)
+    qx = np.stack((a, a, -a, -a))
+    qy = np.stack((b, -b, b, -b))
+    t = np.clip(((qx - ax) * ux + (qy - ay) * uy) / np.where(L2 > 0.0, L2, 1.0), 0.0, 1.0)
+    d = np.minimum(d, np.hypot(qx - (ax + t * ux), qy - (ay + t * uy)).min(axis=0))
+    meets = ((np.minimum(ax, bx) <= a) & (np.maximum(ax, bx) >= -a)
+             & (np.minimum(ay, by) <= b) & (np.maximum(ay, by) >= -b)
+             & (np.abs(ux * ay - uy * ax) <= np.abs(uy) * a + np.abs(ux) * b))
+    return np.where(meets, 0.0, d)
+
+
 def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
                          net_clearances=None):
     """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT net.
@@ -332,23 +438,22 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
 
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           base_clearance=None, net_clearances=None):
-    """Min foreign-pad edge distance sampled along a (short, terminal) segment.
+    """Min foreign-pad edge distance from a (short, terminal) segment, exact.
     Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
     e.g. BGA balls -- use their true outline, not the bounding-box corner that
-    manufactures phantom grazes (#315). Vectorized: windows pads to the segment's
-    bbox + margin, then evaluates ALL sample points against them in one matrix op.
+    manufactures phantom grazes (#315); custom pads by their polygons. Vectorized:
+    windows pads to the segment's bbox + margin, then takes the exact segment-to-
+    pad distance of each in one array op. It used to sample the segment every
+    0.02 mm, which cost (length / 0.02) x pads and could read a corner graze long
+    by a fraction of the step; the result is now never above that sweep's.
     `base_clearance` (#326 B6): see _pt_foreign_pad_dist -- subtracts each pad's
     local-clearance excess so unchanged caller thresholds honor overrides.
     `net_clearances` (#436): see _pt_foreign_pad_dist -- also folds each foreign
     pad's netclass excess so cross-class pad grazes are enforced."""
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
-    n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
-    _t = np.linspace(0.0, 1.0, n + 1)
-    sx = x1 + (x2 - x1) * _t
-    sy = y1 + (y2 - y1) * _t
-    best_custom = _custom_pad_min_dist(
-        custom, net_id, list(zip(sx, sy)), base_clearance, net_clearances)
+    best_custom = _custom_pad_seg_dist(
+        custom, net_id, x1, y1, x2, y2, base_clearance, net_clearances)
     if cx.size == 0:
         return best_custom
     R = _FOREIGN_PAD_WINDOW
@@ -369,8 +474,8 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         # Sweep only the pads that can hold the minimum (as in
         # _seg_foreign_seg_dist): a pad's distance is at least the gap between
         # the probe's bbox and the pad's bbox, less its largest excess, and
-        # sample 0 of the sweep is the probe's first endpoint, whose distance
-        # to any pad bounds the result from above.
+        # the probe's first endpoint is a point of it, whose distance to any
+        # pad bounds the result from above.
         px0, px1, py0, py1 = min(x1, x2), max(x1, x2), min(y1, y2), max(y1, y2)
         fex, fey = ex[near], ey[near]
         gap = np.hypot(
@@ -401,25 +506,19 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
             fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
                              for f in fnids], dtype=float)
             excess = np.maximum(excess, fcls)
-    # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
-    # rotated by R(-rot); identity for axis-aligned pads): shrink the
-    # half-extents by the corner radius, take the outside distance to that
-    # inner rect, then subtract the radius.
-    rows = max(1, _SWEEP_CHUNK // fcx.size)     # see _SWEEP_CHUNK
-    best = math.inf
-    for r0 in range(0, sx.size, rows):
-        sxc, syc = sx[r0:r0 + rows], sy[r0:r0 + rows]
-        ddx = sxc[:, None] - fcx[None, :]
-        ddy = syc[:, None] - fcy[None, :]
-        lx = np.abs(ddx * frc[None, :] + ddy * frs[None, :])
-        ly = np.abs(-ddx * frs[None, :] + ddy * frc[None, :])
-        dx = np.maximum(lx - (fhx[None, :] - fcr[None, :]), 0.0)
-        dy = np.maximum(ly - (fhy[None, :] - fcr[None, :]), 0.0)
-        d = np.hypot(dx, dy) - fcr[None, :]
-        if excess is not None:
-            d = d - excess[None, :]
-        best = min(best, float(np.min(d)))
-    return min(best, best_custom)
+    # Rounded-rect distance in each pad's LOCAL frame (the segment's ends
+    # rotated by R(-rot); identity for axis-aligned pads): the exact distance
+    # from the segment to the inner rect (half-extents shrunk by the corner
+    # radius), less the radius -- the floor of the point distance the sampled
+    # sweep took along the segment, so never above it.
+    ddx1, ddy1 = x1 - fcx, y1 - fcy
+    ddx2, ddy2 = x2 - fcx, y2 - fcy
+    d = _seg_inner_rect_dist(ddx1 * frc + ddy1 * frs, -ddx1 * frs + ddy1 * frc,
+                             ddx2 * frc + ddy2 * frs, -ddx2 * frs + ddy2 * frc,
+                             np.maximum(fhx - fcr, 0.0), np.maximum(fhy - fcr, 0.0)) - fcr
+    if excess is not None:
+        d = d - excess
+    return min(float(np.min(d)), best_custom)
 
 
 def _foreign_seg_arrays(pcb_data, layer):
