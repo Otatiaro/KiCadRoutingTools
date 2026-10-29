@@ -41,6 +41,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from kicad_parser import (PCBData, Segment, find_components_by_type,
                           is_immutable_copper)
 import routing_defaults as defaults
+from routing_config import hole_held_clearance
 from bga_fanout.grid import analyze_bga_grid
 from placement.parser import extract_courtyard_bboxes, extract_locked_refs
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
@@ -1107,6 +1108,11 @@ class _Repair:
         from obstacle_map import resolve_hole_clearance
         self.npth_floor = max(defaults.NPTH_TO_TRACK_CLEARANCE,
                               resolve_hole_clearance(pcb_data, None))
+        # The same floor at VIA drills, without the NPTH fab floor: KiCad's
+        # hole_clearance holds a cap pad that far from a foreign via's hole
+        # (via_keep_radius).
+        from kicad_dru import plated_hole_floor
+        self.plated_hole_floor = plated_hole_floor(pcb_data, pcb_file)
         self.grid_step = grid_step
         self.capture_radius = capture_radius
         # cap_prefix may list several reference prefixes (e.g. "C,R" = caps and
@@ -1165,7 +1171,7 @@ class _Repair:
         # be shaped, priced or filed differently from one present here.
         for v in pcb_data.vias:
             self.vias.append(self._register_via(v.x, v.y, v.net_id,
-                                                radius=self.via_radius(v)))
+                                                radius=self.via_keep_radius(v)))
 
         # --- avoidance: foreign-net tracks the cap's pads can actually TOUCH ---
         # Fanout escapes can land on the bottom (cap) side; attraction could
@@ -1767,6 +1773,19 @@ class _Repair:
         pcb_data.vias AFTER construction, which the tests do.
         """
         return _via_radius(via, self._default_via_size)
+
+    def via_keep_radius(self, via) -> float:
+        """The radius a cap pad of another net is graded against for `via`:
+        its copper radius, grown so that radius + clearance also holds the
+        pad ``plated_hole_floor`` off the via's DRILL (KiCad's hole_clearance
+        grades a pad against a via hole whatever the copper gap). Equal to
+        :meth:`via_radius` on a board that declares no floor or whose rings
+        are wide enough. The growth is priced at the flat clearance, so a
+        pair whose required clearance is higher over-holds, never under."""
+        r = self.via_radius(via)
+        dr = _via_drill_radius(via)
+        return r + hole_held_clearance(self.clearance, self.plated_hole_floor,
+                                       2 * r, 2 * dr) - self.clearance
 
     def _pair_or_flat(self, fa, fb):
         """model.pair for two floors, falling back to the flat scalar whenever

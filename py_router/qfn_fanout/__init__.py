@@ -28,6 +28,8 @@ from bga_fanout import single_pad_net_ids
 from net_queries import matches_net_filter
 from qfn_fanout.layout import analyze_qfn_layout, analyze_pad, single_line_reason
 from qfn_fanout.geometry import calculate_fanout_stub
+from routing_config import hole_held_clearance
+from kicad_dru import plated_hole_floor
 
 # #621: nets whose escape was never ATTEMPTED because this run's own
 # `cancel_check` stopped it -- in practice the GUI's Cancel button or the plan
@@ -487,7 +489,7 @@ def _board_edge_model(pcb_data, clearance, board_edge_clearance):
 
 def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
                         via_size, via_drill, clearance, track_width,
-                        hole_to_hole, adds_via=True):
+                        hole_to_hole, adds_via=True, via_clearance=None):
     """Does a candidate via (and its stub) collide with THIS RUN's own output?
 
     D10. The underpad escape's `via_clears` tested a candidate against the
@@ -563,7 +565,11 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
     from geometry_utils import segment_to_segment_distance
     from obstacle_map import point_to_segment_distance
 
-    via_half = via_size / 2 + clearance - 1e-6
+    # `via_clearance`: what copper of another net keeps from this run's vias,
+    # raised over `clearance` where a ring is narrower than the board's hole
+    # floor minus it (hole_held_clearance); `clearance` when None.
+    via_cl = clearance if via_clearance is None else via_clearance
+    via_half = via_size / 2 + via_cl - 1e-6
     track_half = track_width / 2
     if not adds_via and (px is None
                          or math.hypot(px - vx, py - vy) <= POSITION_TOLERANCE):
@@ -581,7 +587,7 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
         # Skipped for a REUSE: no drill and no via copper is added, so there is
         # no new pair for this run to space.
         if adds_via:
-            floor = max(via_size + clearance if qn != net_id
+            floor = max(via_size + via_cl if qn != net_id
                         else via_size * 0.5, via_drill + hole_to_hole)
             if math.hypot(vx - qx, vy - qy) < floor - 1e-6:
                 return True
@@ -789,6 +795,16 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # layer rule), and inert on the default path, where --layer IS the mount
     # layer.
     _stub_clr = cfg.layer_clearance(footprint.layer, clearance)
+    # KiCad's hole_clearance holds foreign copper `min_hole_clearance` off a
+    # via's DRILL: a via whose ring is narrower than that floor minus the
+    # copper clearance keeps copper of another net off its hole (the routing
+    # map's via_copper_clearance). `_vcl(size, drill)` prices any via.
+    _phc = plated_hole_floor(pcb_data)
+
+    def _vcl(size, drill, cl=clearance):
+        return hole_held_clearance(cl, _phc, size, drill)
+
+    via_cl = _vcl(via_size, via_drill)
     # A SET of halves, so an A/B arm can be 'via', 'via,seg', 'off' or 'all'.
     # 'off' wins over everything (an explicit ablation is never partial), and
     # an empty or unrecognised value is 'all' -- a typo must not silently
@@ -865,9 +881,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                       for s in pcb_data.segments]
 
     pitch = layout.pad_pitch or 0.5
-    # Min centre-to-centre, different nets: the copper rule, or the drill
-    # rule when the board's hole-to-hole asks more (it is net-independent).
-    need_cc = max(via_size + clearance, via_drill + _h2h)
+    # Min centre-to-centre, different nets: the copper rule (raised to hold
+    # each via's copper off the other's hole), or the drill rule when the
+    # board's hole-to-hole asks more (it is net-independent).
+    need_cc = max(via_size + via_cl, via_drill + _h2h)
     stagger = (math.sqrt(max(0.0, need_cc * need_cc - pitch * pitch)) + 0.05
                if need_cc > pitch else 0.0)
     step = max(stagger, grid_step, 0.05)        # offset increment along the escape axis
@@ -912,7 +929,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
             if fn == net_id:
                 continue                        # same-net copper is no obstacle
-            if math.hypot(vx - fx, vy - fy) < via_size / 2 + fs / 2 + clearance - 1e-6:
+            if math.hypot(vx - fx, vy - fy) \
+                    < via_size / 2 + fs / 2 + max(via_cl, _vcl(fs, fd)) - 1e-6:
                 return False
         for hx, hy, hd in _drilled_pad_holes:
             # Net-independent drill floor vs every drilled pad (slot-exact).
@@ -924,18 +942,18 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             # Rotation-exact rectangle clearance (the disc test over-rejected an
             # elongated neighbour pad a pitch away). The via is through-all-layers,
             # so an SMD pad on any single layer still conflicts.
-            if _seg_hits_pad(vx, vy, vx, vy, pad, margin=via_size / 2 + clearance - 1e-6):
+            if _seg_hits_pad(vx, vy, vx, vy, pad, margin=via_size / 2 + via_cl - 1e-6):
                 return False
         for sx0, sy0, sx1, sy1, sw, sn in foreign_tracks:
             if sn == net_id:
                 continue
             if point_to_segment_distance(vx, vy, sx0, sy0, sx1, sy1) \
-                    < via_size / 2 + sw / 2 + clearance - 1e-6:
+                    < via_size / 2 + sw / 2 + via_cl - 1e-6:
                 return False
         return not run_output_conflict(
             vx, vy, net_id, placed, px, py,
             via_size=via_size, via_drill=via_drill, clearance=clearance,
-            track_width=track_width, hole_to_hole=_h2h)
+            track_width=track_width, hole_to_hole=_h2h, via_clearance=via_cl)
 
     def stub_clears_erased(px, py, vx, vy, net_id):
         """#619: is the pad->via stub clear of the copper `nets_to_route` erased?
@@ -974,7 +992,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 if v.net_id == net_id:
                     continue                # own-net copper is no obstacle
                 if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \
-                        < v.size / 2 + track_width / 2 + _stub_clr - 1e-6:
+                        < v.size / 2 + track_width / 2 \
+                        + _vcl(v.size, v.drill, _stub_clr) - 1e-6:
                     return False
         if _gate_seg:
             # Segments, unlike vias, really ARE single-layer objects, so this
@@ -1104,7 +1123,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                         _rvx, _rvy, pi.pad.net_id, placed, px, py,
                         via_size=via_size, via_drill=via_drill,
                         clearance=clearance, track_width=track_width,
-                        hole_to_hole=_h2h, adds_via=False):
+                        hole_to_hole=_h2h, adds_via=False,
+                        via_clearance=via_cl):
                 return (_rvx, _rvy)
         for d in candidate_offsets(pi.pad_width, mode):
             vx, vy = snap(px + ex * d), snap(py + ey * d)
@@ -1998,6 +2018,8 @@ def generate_qfn_fanout(footprint: Footprint,
         return _seg_rings_dist(p1[0], p1[1], p2[0], p2[1], _er) \
             < width / 2 + _ec - 1e-6
 
+    _phc_fan = plated_hole_floor(pcb_data)
+
     def _seg_grazes(p1, p2, net_id, cl=clearance, width=track_width):
         # Board edge first (issue #288) - independent of net.
         if _seg_hits_edge(p1, p2, cl, width):
@@ -2037,8 +2059,10 @@ def generate_qfn_fanout(footprint: Footprint,
         for v in _fanned_existing_vias:
             if v.net_id == net_id:
                 continue
+            # and off its hole by the board's floor (hole_held_clearance)
             if point_to_segment_distance(v.x, v.y, p1[0], p1[1], p2[0], p2[1]) \
-                    < v.size / 2 + width / 2 + cl - 1e-6:
+                    < v.size / 2 + width / 2 \
+                    + hole_held_clearance(cl, _phc_fan, v.size, v.drill) - 1e-6:
                 return True
         return False
 

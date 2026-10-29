@@ -34,7 +34,9 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
   escape clearance is floored at the largest rule on the escape layers), the project's
   same-net-pad record (#581), and the fab floors and escalation policy every routing step
   shares (`--fab-tier` / `--escalation`, below). Net classes are not read: the escape runs
-  at `--clearance` throughout
+  at `--clearance` throughout, raised around each via whose ring is narrower than the
+  board's `min_hole_clearance` minus it, so that copper of another net also clears its
+  drill (`routing_config.hole_held_clearance`, as KiCad's `hole_clearance` grades it)
 - **Staggered packages refused** - a staggered no-lead array (AQFN and friends) is not a
   ball grid: its rows read at half the real pitch. bga_fanout stops in a second and prints
   the `qfn_fanout.py ... --escape-method underpad --allow-via-in-pad` command that handles

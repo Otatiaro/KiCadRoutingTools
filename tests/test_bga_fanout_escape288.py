@@ -30,6 +30,7 @@ from bga_fanout.escape import edge_pair_escape_dir
 from bga_fanout.types import BGAGrid
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'glasgow_revC.kicad_pcb')
+HOLE_FLOOR = 0.15
 
 BASE_CMD = [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'bga_fanout.py'),
             BOARD, '--component', 'U30',
@@ -51,8 +52,27 @@ def _grid():
                    center_x=1.5, center_y=1.5)
 
 
-def _run_fanout(extra, out):
-    res = subprocess.run(BASE_CMD + ['--output', out] + extra,
+def stage(tmp):
+    """A copy of BOARD whose project declares min_hole_clearance HOLE_FLOOR,
+    the floor every via of this run holds at clearance 0.1: clearance + the
+    0.05 ring of the 0.25/0.15 via the auto tier's in-pad clamp descends to.
+    glasgow_revC declares 0.25, at which auto no longer escapes every ball
+    channel drops; this test is about the retry, not the floor."""
+    from copy_board import copy_board
+    src = os.path.join(tmp, 'glasgow.kicad_pcb')
+    copy_board(BOARD, src)
+    pro = src[:-len('.kicad_pcb')] + '.kicad_pro'
+    with open(pro, encoding='utf-8') as fh:
+        doc = json.load(fh)
+    doc['board']['design_settings']['rules']['min_hole_clearance'] = HOLE_FLOOR
+    with open(pro, 'w', encoding='utf-8') as fh:
+        json.dump(doc, fh, indent=2)
+    return src
+
+
+def _run_fanout(extra, out, board):
+    cmd = [board if a == BOARD else a for a in BASE_CMD]
+    res = subprocess.run(cmd + ['--output', out] + extra,
                          cwd=ROOT, capture_output=True, text=True)
     line = next((l for l in res.stdout.splitlines() if 'JSON_SUMMARY' in l), None)
     return res, (json.loads(line.split('JSON_SUMMARY:', 1)[1]) if line else None)
@@ -82,11 +102,12 @@ def run():
           edge_pair_escape_dir(0.0, 3.0, 1.0, 3.0, 'left', 'right', g) in ('up', 'down'))
 
     with tempfile.TemporaryDirectory() as td:
+        board = stage(td)
         # 'auto' must escape at least as many balls as strict channel, and on
         # this board strictly more (channel deterministically drops balls).
         res_ch, js_ch = _run_fanout(['--escape-method', 'channel'],
-                                    os.path.join(td, 'ch.kicad_pcb'))
-        res_auto, js_auto = _run_fanout([], os.path.join(td, 'auto.kicad_pcb'))
+                                    os.path.join(td, 'ch.kicad_pcb'), board)
+        res_auto, js_auto = _run_fanout([], os.path.join(td, 'auto.kicad_pcb'), board)
         check("channel run produced a summary", js_ch is not None)
         check("auto run produced a summary", js_auto is not None)
         if js_ch and js_auto:
@@ -100,7 +121,7 @@ def run():
         # --layer-costs: forbidding In2.Cu must leave it free of NEW copper.
         out_lc = os.path.join(td, 'lc.kicad_pcb')
         res_lc, js_lc = _run_fanout(['--escape-method', 'channel',
-                                     '--layer-costs', '1', '1', '-1', '1'], out_lc)
+                                     '--layer-costs', '1', '1', '-1', '1'], out_lc, board)
         check("layer-costs run produced a summary", js_lc is not None)
         if js_lc:
             from kicad_parser import parse_kicad_pcb
@@ -115,10 +136,10 @@ def run():
 
         # validation: wrong count and forbidden top layer must error out
         res_bad, _ = _run_fanout(['--layer-costs', '1', '1'],
-                                 os.path.join(td, 'bad.kicad_pcb'))
+                                 os.path.join(td, 'bad.kicad_pcb'), board)
         check("wrong --layer-costs count fails", res_bad.returncode != 0)
         res_top, _ = _run_fanout(['--layer-costs', '-1', '1', '1', '1'],
-                                 os.path.join(td, 'top.kicad_pcb'))
+                                 os.path.join(td, 'top.kicad_pcb'), board)
         check("forbidden top layer fails", res_top.returncode != 0)
 
     print()

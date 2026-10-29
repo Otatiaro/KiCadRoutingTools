@@ -35,7 +35,9 @@ Creates escape routing for QFN (Quad Flat No-leads) and QFP (Quad Flat Package) 
 - **Board rules honoured** - a `.kicad_dru` clearance rule for the escape layer replaces
   `--clearance` exactly (the stubs live on one layer, #498); stubs and vias keep the board's
   copper-to-edge clearance; a `--width` below the board's fab track floor is clamped up to
-  it (#223); the project's same-net-pad record (#581) is read.
+  it (#223); the project's same-net-pad record (#581) is read; the under-pad vias keep copper
+  of another net off their drill by the board's `min_hole_clearance`, a thin ring raising
+  the clearance around them and the stagger (`routing_config.hole_held_clearance`).
 - **Auto-pick** - with no `--component`, the QFN (else QFP) candidates lose connector and
   marker parts and are ranked by name (QFN/QFP/DFN/MLF in the footprint name), then pin
   count; the ranking is printed.

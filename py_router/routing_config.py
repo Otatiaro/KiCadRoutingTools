@@ -37,6 +37,22 @@ _LATTICE_REACH = sorted({float(n) for n in range(1, 65)}
                         | {math.hypot(n, 1) for n in range(1, 65)})
 
 
+def hole_held_clearance(clearance: float, plated_hole_clearance: float,
+                        size: float, drill: float) -> float:
+    """Copper clearance a via of ``size``/``drill`` keeps from copper of
+    another net so that its hole also clears ``plated_hole_clearance``:
+    ``max(clearance, plated_hole_clearance - ring)``. ``clearance`` unchanged
+    when no plated floor is declared or the via has no ring. The engines
+    without a routing config (the fanouts) call this directly;
+    :meth:`GridRouteConfig.via_copper_clearance` is the config form."""
+    hc = plated_hole_clearance
+    if not hc or hc <= 0:
+        return clearance
+    if not size or not drill or size <= 0 or drill <= 0:
+        return clearance
+    return max(clearance, hc - (size - drill) / 2.0)
+
+
 def _snap_to_lattice_reach(margin: float, e: float) -> float:
     """Round `margin` up to the smallest cell-to-cell lattice distance that can
     reject everything inside the true keep-out radius (#505).
@@ -544,14 +560,10 @@ class GridRouteConfig:
         from the via's copper is 0.185 mm from its hole, and KiCad reports
         hole_clearance. Returns ``clearance`` unchanged when no plated floor
         is installed, so a board declaring none keeps every stamp as it was."""
-        hc = self.plated_hole_clearance
-        if not hc or hc <= 0:
-            return clearance
         if size is None:
             size, drill = self.via_size, self.via_drill
-        if not size or not drill or size <= 0 or drill <= 0:
-            return clearance
-        return max(clearance, hc - (size - drill) / 2.0)
+        return hole_held_clearance(clearance, self.plated_hole_clearance,
+                                   size, drill)
 
     def via_via_clearance(self, clearance: float, size: float = None,
                           drill: float = None) -> float:

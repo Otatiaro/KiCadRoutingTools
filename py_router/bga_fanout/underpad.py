@@ -54,6 +54,8 @@ from bga_fanout.types import BGAGrid
 from bga_fanout.geometry import clamp_via_to_pad, endpoint_on_pad
 from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
 from routing_defaults import HOLE_TO_HOLE_CLEARANCE
+from routing_config import hole_held_clearance
+from kicad_dru import plated_hole_floor
 
 #: Every via this engine drills is a THROUGH via: the writer gives it no type
 #: word, so KiCad loads it as one whatever its `(layers ...)` pair says. The
@@ -1037,11 +1039,22 @@ def generate_underpad_escape(footprint: Footprint,
         lc = getattr(p, 'local_clearance', 0.0) or 0.0
         return lc - clearance if lc > clearance else 0.0
 
+    # KiCad's hole_clearance holds a via's DRILL `min_hole_clearance` from
+    # copper of another net, so a via whose ring is narrower than that floor
+    # minus the copper clearance keeps foreign copper off its hole, not merely
+    # off its copper: _vcl(ring_r, drill_r) is the copper clearance every via
+    # test below prices (the routing map's via_copper_clearance).
+    _phc = plated_hole_floor(pcb_data)
+
+    def _vcl(ring_r, drill_r):
+        return hole_held_clearance(clearance, _phc, 2.0 * ring_r, 2.0 * drill_r)
+
     own_extra = max((_ovr_extra(p) for p in footprint.pads), default=0.0)
     pad_r = max((max(p.size_x, p.size_y) for p in fp_pads), default=0.4) / 2
     via_r = via_size / 2
+    via_cl = _vcl(via_r, via_drill / 2)
     pad_keep = pad_r + track_width / 2 + clearance + margin + own_extra
-    via_keep = via_r + track_width / 2 + clearance + margin
+    via_keep = via_r + track_width / 2 + via_cl + margin
     trk_keep = track_width + clearance + margin  # other centerlines stay this far
 
     # Issue #202: size each via-in-pad to fit its OWN pad up front, so the via
@@ -1092,7 +1105,7 @@ def generate_underpad_escape(footprint: Footprint,
             clamp_stats['floor'] += 1
         if rung > 0:
             clamp_stats['escalated'] += 1
-        return cs, cd, cs / 2 + track_width / 2 + clearance + margin
+        return cs, cd, cs / 2 + track_width / 2 + _vcl(cs / 2, cd / 2) + margin
 
     def vkeep_for_pad(p):
         """Keep-out radius for the (clamped, #202) via that will land in pad p.
@@ -1103,8 +1116,8 @@ def generate_underpad_escape(footprint: Footprint,
         via_keep (the clamp only shrinks), so it can only free space, never
         under-reserve: any via that lands in a pad too small for the nominal via
         is itself bounded by that pad's clamped size."""
-        cs = clamp_via_to_pad(via_size, via_drill, p, floors)[0]
-        return cs / 2 + track_width / 2 + clearance + margin
+        cs, cd = clamp_via_to_pad(via_size, via_drill, p, floors)[:2]
+        return cs / 2 + track_width / 2 + _vcl(cs / 2, cd / 2) + margin
 
     # Exact foreign-copper registry (issue #393) -------------------------------
     # The occupancy grid cannot say WHOSE stamp blocked a cell, and two of its
@@ -1157,7 +1170,8 @@ def generate_underpad_escape(footprint: Footprint,
     # Existing vias / copper on the board within the region.
     for v in pcb_data.vias:
         if bounds[0] <= v.x <= bounds[2] and bounds[1] <= v.y <= bounds[3]:
-            vkeep_v = v.size / 2 + track_width / 2 + clearance
+            vkeep_v = v.size / 2 + track_width / 2 + _vcl(
+                v.size / 2, (getattr(v, 'drill', 0) or 0.0) / 2)
             occ.block_all(v.x, v.y, vkeep_v)
             exact_vias.append((v.x, v.y, v.size / 2.0,
                                (getattr(v, 'drill', 0) or 0.0) / 2.0, v.net_id))
@@ -1274,8 +1288,11 @@ def generate_underpad_escape(footprint: Footprint,
     def via_site_ok(x, y, v_half):
         """A through via at (x, y) spans EVERY copper layer, so its ring must
         clear each immovable SMD pad by `clearance` even when the pad's layer
-        is not one of the two runs the layer-blocking test sees."""
-        return via_clears_pad_rects(x, y, v_half, clearance, locked_smd_pads)
+        is not one of the two runs the layer-blocking test sees -- and its
+        drill the pad by the hole floor, priced on the nominal drill (a
+        clamped via's drill is never larger, so its ring is never narrower)."""
+        return via_clears_pad_rects(x, y, v_half, _vcl(v_half, via_drill / 2),
+                                    locked_smd_pads)
 
     # MOVABLE passives' pads (unlocked 2-pad C/R/FB) become SOFT keep-outs
     # (#278). place_fanout_clearance moves these parts off fanout copper
@@ -1350,7 +1367,8 @@ def generate_underpad_escape(footprint: Footprint,
                 continue
             add(x, y, keep, li)
         for v in vias_to_add:
-            keep = v['size'] / 2.0 + track_width / 2 + clearance + margin
+            keep = v['size'] / 2.0 + track_width / 2 + _vcl(
+                v['size'] / 2.0, (v.get('drill') or via_drill) / 2.0) + margin
             if v['net_id'] in net_ids or not near_pt(v['x'], v['y'], home_r + keep):
                 continue
             add(v['x'], v['y'], keep, None)
@@ -1483,23 +1501,26 @@ def generate_underpad_escape(footprint: Footprint,
             vr = via_size / 2.0
         if vdr is None:
             vdr = (via_drill or 0.0) / 2.0
+        # Copper of another net clears this via's hole (own_cl), and a foreign
+        # via's copper clears this hole and its own (the narrower ring decides).
+        own_cl = _vcl(vr, vdr)
         for (ox, oy, orr, odr, onid) in ctx['vias']:
             d = math.hypot(ox - x, oy - y)
             if d < vdr + odr + _h2h - 1e-6:
                 return "drill hole-to-hole vs a via"
-            if onid != net_id and d < vr + orr + clearance - 1e-6:
+            if onid != net_id and d < vr + orr + max(own_cl, _vcl(orr, odr)) - 1e-6:
                 return "via ring vs a foreign via"
         for (ox, oy, orr, odr, onid) in ([] if skip_resv else ctx['resv']):
             d = math.hypot(ox - x, oy - y)
             if d < vdr + odr + _h2h - 1e-6:
                 return "drill hole-to-hole vs a reserved via site"
-            if onid != net_id and d < vr + orr + clearance - 1e-6:
+            if onid != net_id and d < vr + orr + max(own_cl, _vcl(orr, odr)) - 1e-6:
                 return "via ring vs a reserved via site"
         for (px, py, half, pdr, pnid, has_cu) in ctx['pads']:
             d = math.hypot(px - x, py - y)
             if pdr and d < vdr + pdr + _h2h - 1e-6:
                 return "drill hole-to-hole vs a pad drill"
-            if has_cu and pnid != net_id and d < vr + half + clearance - 1e-6:
+            if has_cu and pnid != net_id and d < vr + half + own_cl - 1e-6:
                 return "via ring vs a foreign pad"
         for (x1, y1, x2, y2, half_w, snid, _li) in ctx['segs']:
             dx, dy = x2 - x1, y2 - y1
@@ -1509,7 +1530,7 @@ def generate_underpad_escape(footprint: Footprint,
                 d = math.hypot(x - (x1 + t * dx), y - (y1 + t * dy))
             else:
                 d = math.hypot(x - x1, y - y1)
-            if d < vr + half_w + clearance - 1e-6:
+            if d < vr + half_w + own_cl - 1e-6:
                 return "via ring vs a foreign track"
         return None
 
@@ -2156,7 +2177,7 @@ def generate_underpad_escape(footprint: Footprint,
         spot at full clearance -- the template's home exemption covers both
         balls' lenses, so seg_clear cannot see the partner's gap via."""
         vx, vy = _via_spot(other, True)
-        need = via_size / 2.0 + track_width / 2.0 + clearance - 1e-6
+        need = via_size / 2.0 + track_width / 2.0 + via_cl - 1e-6
         return all(_pt_seg_d(vx, vy, a[0], a[1], b[0], b[1]) >= need
                    for a, b in this_segs)
 
@@ -2416,7 +2437,7 @@ def generate_underpad_escape(footprint: Footprint,
         for (ox, oy, orr, odr, onid) in ctx['vias'] + ctx['resv']:
             if onid == net_id:
                 continue
-            if _pt_seg_d(ox, oy, gx, gy, vx, vy) < hw + orr + clearance - 1e-6:
+            if _pt_seg_d(ox, oy, gx, gy, vx, vy) < hw + orr + _vcl(orr, odr) - 1e-6:
                 return True
         for (px_, py_, half, pdr, pnid, has_cu) in ctx['pads']:
             if not has_cu or pnid == net_id:
@@ -2489,7 +2510,7 @@ def generate_underpad_escape(footprint: Footprint,
                 # C39 and the short shipped). A through via meets the pad on
                 # whatever layer it is, so the whole ring must clear.
                 if not via_clears_pad_rects(
-                        vx, vy, via_size / 2.0, clearance,
+                        vx, vy, via_size / 2.0, via_cl,
                         [q for q in soft_pads if q.net_id != p.net_id]):
                     return False
             if locked_smd_pads and not via_site_ok(vx, vy, via_size / 2.0):
@@ -2546,7 +2567,7 @@ def generate_underpad_escape(footprint: Footprint,
         # the call's (_dogbone_site_valid)
         vx, vy = site
         vs, vd = via or (via_size, via_drill)
-        keep = vs / 2 + track_width / 2 + clearance + margin
+        keep = vs / 2 + track_width / 2 + _vcl(vs / 2, vd / 2) + margin
         occ.block_all(vx, vy, keep)
         reserved_sites.append((vx, vy, vs / 2.0,
                                (vd or 0.0) / 2.0, p.net_id))
@@ -2578,7 +2599,7 @@ def generate_underpad_escape(footprint: Footprint,
         vx, vy = site
         hx, hy = grid.pitch_x / 2.0, grid.pitch_y / 2.0
         vs, vd = via or (via_size, via_drill)
-        keep = vs / 2 + track_width / 2 + clearance + margin
+        keep = vs / 2 + track_width / 2 + _vcl(vs / 2, vd / 2) + margin
         if math.hypot(vx - gx, vy - gy) > 1.2 * math.hypot(hx, hy):
             return None                      # not an adjacent gap of this ball
         # strictly an INTER-ball gap: a site on the boundary line leaves a
@@ -3600,8 +3621,10 @@ def generate_underpad_escape(footprint: Footprint,
                                    < _hw + t['width'] / 2.0 + clearance - 1e-6 for t in tracks)
                 if _sok:
                     _vs = list(exact_vias) + list(reserved_sites) + [
-                        (v['x'], v['y'], v['size'] / 2.0, 0.0, v['net_id']) for v in vias_to_add]
-                    _sok = not any(vnid != _sp.net_id and _pt_seg_d(vx, vy, _ax, _ay, _bx, _by) < _hw + vr + clearance - 1e-6
+                        (v['x'], v['y'], v['size'] / 2.0, (v.get('drill') or 0.0) / 2.0, v['net_id'])
+                        for v in vias_to_add]
+                    _sok = not any(vnid != _sp.net_id
+                                   and _pt_seg_d(vx, vy, _ax, _ay, _bx, _by) < _hw + vr + _vcl(vr, _vd) - 1e-6
                                    for (vx, vy, vr, _vd, vnid) in _vs)
                 if _sok:
                     _sok = not any(has_cu and pnid != _sp.net_id
