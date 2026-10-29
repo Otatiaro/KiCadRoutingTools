@@ -313,7 +313,6 @@
   },
   "kicad_routing_tools": {
     "fab_floor_origin": {
-      "min_hole_clearance": 0.25,
       "min_through_hole_diameter": 0.3,
       "min_track_width": 0.2,
       "min_via_annular_width": 0.1,

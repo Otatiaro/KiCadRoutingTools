@@ -948,12 +948,22 @@ def _install_plated_hole_clearance(config, input_file, pcb_data) -> None:
     fronts already calls this function on its config."""
     if not hasattr(config, 'plated_hole_clearance'):
         return
+    config.plated_hole_clearance = plated_hole_floor(pcb_data, input_file, config)
+
+
+def plated_hole_floor(pcb_data, input_file=None, config=None) -> float:
+    """The copper-to-hole floor KiCad holds via drills and PTH barrels to, in
+    mm (0.0 = the board declares none): ``resolve_hole_clearance`` (an explicit
+    ``config.hole_clearance``, else the declared ``min_hole_clearance`` raised
+    to its ``fab_floor_origin``). For engines that carry no routing config
+    (the BGA and QFN fanouts); routing steps read
+    ``config.plated_hole_clearance``, installed from this."""
     try:
         from obstacle_map import resolve_hole_clearance
         hc = resolve_hole_clearance(pcb_data, config, input_file or None)
     except Exception:                                           # noqa: BLE001
         hc = 0.0
-    config.plated_hole_clearance = float(hc or 0.0)
+    return float(hc or 0.0)
 
 
 def _read_layer_map(input_file, pcb_data, fallback_layers):

@@ -232,9 +232,9 @@ ROWS = [
     ('reinline-the-tuple-in-init', 'fc',
      """        for v in pcb_data.vias:
             self.vias.append(self._register_via(v.x, v.y, v.net_id,
-                                                radius=self.via_radius(v)))""",
+                                                radius=self.via_keep_radius(v)))""",
      """        for v in pcb_data.vias:
-            _r = self.via_radius(v)
+            _r = self.via_keep_radius(v)
             _t = (v.x, v.y, v.net_id,
                   _r + self._item_reach(self._via_floor_for(v.net_id)))
             self.vias.append(_t)

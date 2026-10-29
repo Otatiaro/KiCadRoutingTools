@@ -2210,6 +2210,9 @@ still replay.
 - **Clearance.** Given, `--clearance` is a ceiling: every net class is priced
   at `min(class, value)` and the output project is clamped to it. Omitted,
   each pair is priced at its own net-class clearance and the classes are kept.
+  A cap pad also keeps the board's `min_hole_clearance` from a foreign via's
+  drill, which KiCad grades whatever the copper gap: a via whose ring is
+  narrower than that floor minus the clearance holds the pad further off.
 - **`--intent`.** The intent's decap limits (`decaps.max_distance_mm`,
   `decaps.max_pin_distance_mm`, at error severity) are held: no move takes a
   claim past its limit and further than the board as it stands, unless no
