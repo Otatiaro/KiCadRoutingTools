@@ -615,7 +615,28 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
                                     power_net_widths=power_widths,
                                     via_size=v_dia, via_drill=v_drill,
                                     max_iterations=max_iters))
-    return [_bound_rung_margin(r, net_id, config.grid_step) for r in rungs]
+    return _distinct_rungs([_bound_rung_margin(r, net_id, config.grid_step)
+                            for r in rungs])
+
+
+def _distinct_rungs(rungs):
+    """The rungs in order, each one equal to an earlier rung left out.
+
+    A rung that equals an earlier one repeats that rung's attempt exactly: the
+    same map (built from the same window at the same geometry), the same seeds
+    and the same search -- which failed, or the ladder would have stopped there.
+    Under --escalation off the clearance ladder is a single rung at the run's
+    own clearance, track and power widths, i.e. rung 0 again, so every failed
+    gap searched twice. A rung whose fields cannot be compared is kept."""
+    out = []
+    for r in rungs:
+        try:
+            dup = any(r == o for o in out)
+        except (TypeError, ValueError):
+            dup = False
+        if not dup:
+            out.append(r)
+    return out
 
 
 def _bound_rung_margin(cfg, net_id, run_grid):
