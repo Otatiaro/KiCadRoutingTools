@@ -2184,6 +2184,28 @@ def _strap_unescaped_extras(footprint: Footprint, pcb_data: PCBData,
     return strapped, still_bare
 
 
+def _note_floor_clearance(copper, nominal, delivered, site, pcb_data):
+    """Record the clearance a fab-floor pass shipped ``copper`` (track and via
+    dicts) at, per net, when it is below the run's ``nominal``: a
+    ``design_rules`` clearance row for each net (``fab_tiers.note_narrowing``)
+    and the clearance ledger, whose minimum the writeback stores as the
+    Default class on both fronts -- as qfn_fanout's escalated stubs do (#1328).
+    Unrecorded, the copper shipped at the floor while the project kept the
+    nominal clearance, and KiCad graded it there."""
+    if delivered is None or nominal is None or delivered >= nominal - 1e-9:
+        return
+    from fab_tiers import note_narrowing
+    import clearance_ledger
+    nids = sorted({c['net_id'] for c in copper if c.get('net_id')})
+    if not nids:
+        return
+    for nid in nids:
+        net = pcb_data.nets.get(nid)
+        note_narrowing(nid, 'clearance', nominal, delivered, site,
+                       net_name=net.name if net else None)
+    clearance_ledger.record(delivered)
+
+
 def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
                             tracks, vias_to_add, failed_nets):
     """Retry balls the under-pad escape DROPPED, at the FAB FLOOR (#505).
@@ -2295,6 +2317,7 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
             vias_to_add = vias_to_add + v2
             failed_nets = [p.net_name for p in _left]
             warn_fab_escalation('under-pad escape rescue')
+            _note_floor_clearance(t2 + v2, cl0, cl, 'under-pad escape rescue', pcb_data)
         if not failed_nets:
             break
     return tracks, vias_to_add, failed_nets
@@ -2774,6 +2797,10 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
             print(o['msg'] + (f" [{len(outs)} equally near victims tried, "
                               f"judged by vias then copper]" if len(outs) > 1 else ""))
             warn_fab_escalation('rip-swap escape rescue')
+            # the re-escaped pair: every attempt lays both at the floor
+            _pair = {p.net_id for n in (fnet, victim) for p in pads_by_net.get(n, ())}
+            _note_floor_clearance([c for c in o['tracks'] + o['vias'] if c['net_id'] in _pair],
+                                  up_kw['clearance'], cl, 'rip-swap escape rescue', pcb_data)
             rescued = True
             break
         if not rescued and cands:
@@ -4997,6 +5024,8 @@ def generate_bga_fanout(footprint: Footprint,
                     d_tracks = d_tracks + d2_tracks
                     d_vias = d_vias + d2_vias
                     warn_fab_escalation('plane drop')
+                    _note_floor_clearance(d2_tracks + d2_vias, clearance, _cl,
+                                          'plane drop', pcb_data)
                     for _k in ('gap_vias', 'pad_vias', 'track_connects', 'pour_tracks'):
                         rep[_k] = rep.get(_k, 0) + rep2.get(_k, 0)
                     rep['failed'] = rep2.get('failed', 0)
