@@ -3736,13 +3736,28 @@ def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
     """
     coord = GridCoord(config.grid_step)
 
-    # #581: keep every new via off this net's own SMD pads when the board
-    # carries an active same-net pad via clearance. Callers of this function
-    # stamp CLONED per-route maps (Phase 3 taps, the non-incremental builder),
-    # so no balanced removal is needed. MIRROR into the small-rung map (#568):
-    # a rung-1 search consults ONLY blocked_vias_small for dynamic copper, so
-    # without the mirror it drops a small fab-rung via straight into the pad
-    # this keep-out exists to protect (neo6502: 0.45mm vias in R14/U6 pads).
+    add_same_net_pad_via_keepout(obstacles, pcb_data, net_id, config)
+
+    # Same-net via spacing: only via placement is blocked (tracks may pass
+    # through same-net vias).
+    ring = same_net_via_ring_cells(pcb_data.vias, net_id, config, coord)
+    if len(ring):
+        obstacles.add_blocked_vias_batch(ring)
+        for r in populated_via_rungs(obstacles):
+            obstacles.add_blocked_vias_rung_batch(r, ring)
+
+
+def add_same_net_pad_via_keepout(obstacles: GridObstacleMap, pcb_data: PCBData,
+                                 net_id: int, config: GridRouteConfig):
+    """#581: keep every new via off this net's own SMD pads when the config
+    carries an active same-net pad via clearance; a no-op otherwise.
+
+    Callers stamp CLONED per-route maps (Phase 3 taps, the non-incremental
+    builder) or a map built for this net alone (the oracle's welds), so no
+    balanced removal is needed. MIRROR into the small-rung map (#568): a
+    rung-1 search consults ONLY blocked_vias_small for dynamic copper, so
+    without the mirror it drops a small fab-rung via straight into the pad
+    this keep-out exists to protect (neo6502: 0.45mm vias in R14/U6 pads)."""
     _pad_cells = same_net_pad_via_keepout_cells(pcb_data, net_id, config)
     if len(_pad_cells):
         obstacles.add_blocked_vias_batch(_pad_cells)
@@ -3759,14 +3774,6 @@ def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
                 populated_only=True)
         except (AttributeError, NameError):
             pass
-
-    # Same-net via spacing: only via placement is blocked (tracks may pass
-    # through same-net vias).
-    ring = same_net_via_ring_cells(pcb_data.vias, net_id, config, coord)
-    if len(ring):
-        obstacles.add_blocked_vias_batch(ring)
-        for r in populated_via_rungs(obstacles):
-            obstacles.add_blocked_vias_rung_batch(r, ring)
 
 
 def populated_via_rungs(obstacles) -> List[int]:

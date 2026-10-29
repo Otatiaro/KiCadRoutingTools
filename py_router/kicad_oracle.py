@@ -1986,7 +1986,24 @@ def oracle_reconnect(board_file: str, net_names, config,
     from kicad_writer import generate_segment_sexpr, generate_via_sexpr
     from plane_region_connector import (build_base_obstacles,
                                         route_plane_connection_wide)
+    from obstacle_map import add_same_net_pad_via_keepout
     from sense_branch import join_link_end
+
+    def _weld_obstacles(pcb_data, routing_layers, net_id, cfg):
+        """The obstacle map a weld of net_id routes on at cfg's via: every
+        other net's copper, plus the net's own SMD pads closed to new vias
+        when cfg carries a same-net pad via clearance (#581), as the engine's
+        routers do -- else the shortest link drops its via into the pad."""
+        obstacles, _ = build_base_obstacles(
+            exclude_net_ids={net_id},
+            routing_layers=routing_layers,
+            pcb_data=pcb_data,
+            config=cfg,
+            track_width=cfg.track_width,
+            track_via_clearance=track_via_clearance,
+            hole_to_hole_clearance=hole_to_hole_clearance)
+        add_same_net_pad_via_keepout(obstacles, pcb_data, net_id, cfg)
+        return obstacles
 
     # CALL-SCOPED timeout memo (#713 item 3). One set per oracle_reconnect,
     # shared by every kicad_unconnected this call makes -- the union demand
@@ -2516,14 +2533,8 @@ def oracle_reconnect(board_file: str, net_names, config,
             base_obstacles = _obs_memo.get(_obs_key)
             if base_obstacles is None:
                 _obs_memo.clear()   # keep exactly one map alive
-                base_obstacles, _ = build_base_obstacles(
-                    exclude_net_ids={net_id},
-                    routing_layers=routing_layers,
-                    pcb_data=pcb_data,
-                    config=config,
-                    track_width=config.track_width,
-                    track_via_clearance=track_via_clearance,
-                    hole_to_hole_clearance=hole_to_hole_clearance)
+                base_obstacles = _weld_obstacles(pcb_data, routing_layers,
+                                                 net_id, config)
                 _obs_memo[_obs_key] = base_obstacles
             net_vias = [(v.x, v.y) for v in pcb_data.vias
                         if v.net_id == net_id]
@@ -2602,14 +2613,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                         replace(_pw_cfg, via_size=_vs, via_drill=_vd)
                     _eobst = base_obstacles
                     if _vs != config.via_size:
-                        _eobst, _ = build_base_obstacles(
-                            exclude_net_ids={net_id},
-                            routing_layers=routing_layers,
-                            pcb_data=pcb_data,
-                            config=_ecfg,
-                            track_width=_ecfg.track_width,
-                            track_via_clearance=track_via_clearance,
-                            hole_to_hole_clearance=hole_to_hole_clearance)
+                        _eobst = _weld_obstacles(pcb_data, routing_layers,
+                                                 net_id, _ecfg)
                     _eres, _ = route_plane_connection_wide(
                         _esrc, _etgt,
                         plane_layer_idx=layer_map.get(_elayer, anchor_layer),
@@ -2890,14 +2895,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                     replace(_pw_cfg, via_size=vs, via_drill=vd)
                 rung_obstacles = base_obstacles
                 if vs != config.via_size:
-                    rung_obstacles, _ = build_base_obstacles(
-                        exclude_net_ids={net_id},
-                        routing_layers=routing_layers,
-                        pcb_data=pcb_data,
-                        config=rung_cfg,
-                        track_width=rung_cfg.track_width,
-                        track_via_clearance=track_via_clearance,
-                        hole_to_hole_clearance=hole_to_hole_clearance)
+                    rung_obstacles = _weld_obstacles(pcb_data, routing_layers,
+                                                     net_id, rung_cfg)
                 result = None
                 _walled = (walled_copy(rung_obstacles, pcb_data, net_id,
                                        routing_layers, rung_cfg,
