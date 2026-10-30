@@ -10,8 +10,10 @@ neighbours, so it never meets /PC-RST's B.Cu track 0.42 mm above the finger
 shipped open. The same board with `--power-nets-widths 0.2 0.2` (narrow
 frontier only) named /PC-RST, ripped it and routed VCC.
 
-The chain: signal routing of everything but VCC/GND, the /PC-RST wall staged
-over VCC's finger (check_join --keep-staged), VCC/GND routed once at 0.2 to
+The chain: interf_u with everything but VCC/GND routed (a frozen board,
+tests/fixtures/1400/interf_u_signals.kicad_pcb, so that a change in how the
+signal step rips cannot move the scene), the /PC-RST wall staged over VCC's
+finger (check_join --keep-staged), VCC/GND routed once at 0.2 to
 leave VCC's finger tap open, then again at 0.7 with the rescue ladder off.
 
 Rows:
@@ -66,13 +68,13 @@ def main():
 
     tmp = tempfile.mkdtemp(prefix='t1400_')
     try:
-        src = os.path.join(ROOT, 'kicad_files', 'interf_u_unrouted_placed.kicad_pcb')
+        src = os.path.join(ROOT, 'tests', 'fixtures', '1400',
+                           'interf_u_signals.kicad_pcb')
         sig = os.path.join(tmp, 'sig.kicad_pcb')
         wall = os.path.join(tmp, 'wall.kicad_pcb')
         opened = os.path.join(tmp, 'open.kicad_pcb')
         w07 = os.path.join(tmp, 'w07.kicad_pcb')
-        run('py_router/route.py', src, sig, '--nets', '*', '!VCC', '!GND', *COMMON,
-            '--via-cost', '150')
+        run('py_router/copy_board.py', src, sig)
         run('py_tools/check_join.py', sig, '/PC-RST', '163.4,132.1,B.Cu',
             '162.4,133.1,B.Cu', '162.4,134.2,B.Cu', '165.6,134.2,B.Cu', '167.0,135.6,B.Cu',
             '--width', '0.2', '--keep-staged', wall, '-q')
