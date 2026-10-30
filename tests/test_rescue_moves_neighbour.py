@@ -12,7 +12,10 @@ requested 0.2 (kicad_files/splitflap_driver at 0.2, GND past /SENSOR_F).
    them, and the write-list holds the moved copper, not the lifted track.
 2. A neighbour that cannot make room (its own pad sits mid-channel) goes back as
    it was: the same objects on the board and on its result, and the neck-down ships.
-3. A locked neighbour, and copper the run did not lay, are not moved.
+3. A locked neighbour, and copper the run did not lay, are not moved. Nor is
+   anything moved while another net still waits: the route at the run's rules
+   takes more room than the neck-down, and that room may be the other net's way
+   out (kicad_files/watchy: +3V3 past EN, then SDA stayed open).
 4. Same input, same copper.
 5. route.py end to end on a channel the run's grid cannot share: no neck-down,
    check_drc at the requested clearance and check_connected clean.
@@ -163,6 +166,29 @@ def test_not_moved():
               and summary['recovered'] == ['OPEN'] and used is not None and used < CLR)
 
 
+def test_not_moved_while_another_net_waits():
+    pcb, run = _scene()
+    later = 4
+    pcb.nets[later] = make_net(later, 'OPEN_LATER')
+    pcb.pads_by_net[later] = [
+        make_pad(later, -2.0, -1.2, ref='U6', num='1', net_name='OPEN_LATER',
+                 size_x=0.3, size_y=0.3),
+        make_pad(later, -1.0, -1.2, ref='U7', num='1', net_name='OPEN_LATER',
+                 size_x=0.3, size_y=0.3)]
+    owner = {'net_name': 'NEIGHBOUR', 'net_id': NEIGHBOUR,
+             'new_segments': [run], 'new_vias': []}
+    state = SimpleNamespace(pcb_data=pcb, config=_cfg(), routed_results={NEIGHBOUR: owner},
+                            results=[owner], remaining_net_ids=[OPEN, later],
+                            routed_net_ids=[NEIGHBOUR], net_history={}, route_index=0,
+                            diff_pair_by_net_id={})
+    summary = rescue_failed_nets(state, [('OPEN', OPEN), ('OPEN_LATER', later)])
+    used = getattr(pcb.board_info, 'min_clearance_used', None)
+    check('3. another net waiting: left where it is', any(s is run for s in pcb.segments))
+    check('3. another net waiting: the neck-down ships',
+          summary is not None and sorted(summary['recovered']) == ['OPEN', 'OPEN_LATER']
+          and used is not None and used < CLR, str(used))
+
+
 def _run(args):
     return subprocess.run([sys.executable, '-X', 'utf8'] + args, cwd=ROOT, capture_output=True,
                           text=True, encoding='utf-8', errors='replace')
@@ -208,7 +234,8 @@ if __name__ == '__main__':
     first = test_neighbour_moves()
     test_neighbour_that_cannot_make_room()
     test_not_moved()
-    second = test_neighbour_moves()
+    test_not_moved_while_another_net_waits()
+    second =test_neighbour_moves()
     check('4. same input, same copper', first == second)
     test_route_end_to_end()
     print('\n%s' % ('FAILED: %d' % len(fails) if fails else 'ALL PASSED'))
