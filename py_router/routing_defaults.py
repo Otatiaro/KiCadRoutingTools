@@ -345,6 +345,7 @@ RESCUE_MAX_MARGIN_CELLS = 30      # a rung whose wide-net A* track margin exceed
                                   # past the run's own): the swept-capsule test
                                   # costs (2r+1)^2 cells per neighbour
 RESCUE_MAX_EDGES_PER_NET = 8      # max gap-closing attempts per rescued net
+RESCUE_MAX_NEIGHBOUR_MOVES = 3    # neighbours tried, one by one, before a neck-down ships
 RESCUE_MAX_ITERATIONS = 1_000_000  # per-rung A* backstop. Deliberately generous:
                                    # hopeless rungs exhaust the small fenced window
                                    # in far fewer iterations no matter the budget
