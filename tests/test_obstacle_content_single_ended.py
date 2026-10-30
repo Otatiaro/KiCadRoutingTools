@@ -115,6 +115,10 @@ ALLOWLIST = {
         'COVERED: the refresh is at the SHARED commit point after both\n         branches, not inside each commit\'s own block',
     'py_router/net_rescue.py:_attempt_net_at_geometry':
         'COVERED: as rescue_failed_nets -- rescue rebuilds its own pristine\n         window maps (copper-epoch keyed) and the shared refresh covers the\n         persistent map',
+    'py_router/net_rescue.py:_close_net_at_nominal':
+        'BY DESIGN: its caller, _move_neighbour_before_narrowing, owns the refresh',
+    'py_router/net_rescue.py:_move_neighbour_before_narrowing':
+        'COVERED: a kept move refreshes the neighbour and hands the gap route\n         to rescue_failed_nets; a move that fails puts the same objects back,\n         so no persistent map ever saw it',
 }
 
 #: Commit paths this gate would like to exercise. Reported, not required --

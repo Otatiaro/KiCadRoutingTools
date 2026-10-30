@@ -21,7 +21,10 @@ Design constraints (#331/#371 review):
   - NO rip-up here: the rescue routes through free space only, and each
     committed edge is verified to reduce the net's component count on the
     real board (else it is removed again) - a failed rescue leaves the
-    board untouched.
+    board untouched. One exception, before a neck-down ships: the tracks
+    standing in the way of a route at the run's own rules may move, if that
+    route and their own reconnection both land at those rules
+    (_move_neighbour_before_narrowing), and go back if not.
   - Scoped, never board-global: a fresh obstacle map is built on a small
     window around the remaining GAP (the #329/#134 partial restores mean
     the gap is usually a short missing link, not the whole net).
@@ -522,8 +525,9 @@ def _via_step_down(config, net_id, **kw):
     return replace(config, net_via_sizes=nvs, **kw)
 
 
-def _rescue_rungs(config, fine_grid, pcb_data, net_id):
-    """The scoped retry ladder for one net (see module docstring)."""
+def _rescue_rungs(config, fine_grid, pcb_data, net_id, nominal_only=False):
+    """The scoped retry ladder for one net (see module docstring). nominal_only
+    stops at rung 0: no neck-down, and no fab escalation noted for one."""
     from plane_pad_tap import _clearance_ladder, fab_floor_clearance_track
 
     # Rescue runs at ITS OWN budget, not the step's: the windowed scope
@@ -538,6 +542,8 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     if fine_grid < config.grid_step - 1e-9:
         rungs.append(replace(config, grid_step=fine_grid,
                              max_iterations=max_iters))
+    if nominal_only:
+        return [_bound_rung_margin(r, net_id, config.grid_step) for r in rungs]
 
     from fab_tiers import may_narrow
     fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
@@ -704,9 +710,12 @@ def seed_rows(points, cfg, window):
 
 def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
                   strict_endpoints: bool = False, island_points=None,
-                  endpoints=None):
+                  endpoints=None, nominal_only: bool = False):
     """Try to route one gap inside a scoped window. Returns (result, cfg_used)
     or (None, None). Routes through free space only - no rip-up.
+
+    nominal_only: only the rungs at the run's own clearance and width (the
+    finer grids), never a neck-down.
 
     endpoints: (source_points, target_points), (x, y[, layer]) board mm --
     the copper the caller already KNOWS each side of the gap is (the
@@ -746,7 +755,8 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
     # obstacles still apply in full).
     if config.bga_exclusion_zones:
         config = replace(config, bga_exclusion_zones=[])
-    for cfg in _rescue_rungs(config, fine_grid, pcb_data, net_id):
+    for cfg in _rescue_rungs(config, fine_grid, pcb_data, net_id,
+                             nominal_only=nominal_only):
         # Rung 0 keeps the run's exact clearance semantics (incl. per-netclass
         # spacing). The neck-down rungs' whole point is spacing below nominal
         # FOR THE RESCUED NET, so its own map entry is dropped (the builder's
@@ -875,6 +885,124 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
                 continue
             return result, cfg
     return None, None
+
+
+def _close_net_at_nominal(pcb_data, net_id, config, net_clearances):
+    """Reconnect a net at the run's own rules. Returns the routes laid, or
+    None (with nothing left on the board) when a part stays apart."""
+    from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
+
+    laid = []
+    num, comp_points, comp_pads = _net_component_info(pcb_data, net_id)
+    while num > 1:
+        main = _main_component(comp_pads)
+        pairs = [_closest_pair(comp_points[main], pts)
+                 for cid, pts in comp_points.items()
+                 if cid != main and cid in comp_pads]
+        pairs = sorted(p for p in pairs if p is not None)
+        result = None
+        if pairs:
+            result, _cfg = _attempt_edge(pcb_data, net_id, pairs[0], config,
+                                         net_clearances, nominal_only=True)
+        if result is not None:
+            add_route_to_pcb_data(pcb_data, result)
+            laid.append(result)
+            num_after, comp_points, comp_pads = _net_component_info(pcb_data, net_id)
+        if result is None or num_after >= num:
+            for r in reversed(laid):
+                remove_route_from_pcb_data(pcb_data, r)
+            return None
+        num = num_after
+    return laid
+
+
+def _move_neighbour_before_narrowing(state, net_id, gap, island, narrow_result,
+                                     narrow_cfg, config, net_clearances):
+    """Try the gap at the run's own rules by moving the neighbour in its way.
+
+    `narrow_result` is the route a neck-down rung found, not on the board. The
+    other nets' tracks near it are what stands between the gap and a route at
+    the requested rules: those inside the run's clearance of it first, then
+    those one track width further (a neck-down can clear a neighbour and graze
+    the wall behind it). Each net in turn has those pieces lifted: if the gap
+    then routes at the run's own clearance and width, and the neighbour
+    reconnects at them too, both stay. Anything less puts every piece back, so a
+    failure leaves the board as it found it. A rung's clearance is a last
+    resort: moving a neighbour delivers what was asked for.
+
+    Returns (result, cfg) for the gap, or None."""
+    from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
+    from protected_nets import rip_refusal
+    from rip_up_reroute import _saved_route_colliders
+    from obstacle_cache import refresh_net_obstacles
+
+    pcb_data = state.pcb_data
+    routed_results = state.routed_results
+    # The route must fit at the run's width, not only at the rung's.
+    width = config.get_net_track_width(net_id, config.layers[0])
+    grow = max(0.0, width - narrow_cfg.track_width) / 2.0
+
+    def _tracks_within(reach):
+        found = {}
+        for kind, obj in _saved_route_colliders(narrow_result, pcb_data, [net_id], reach,
+                                                config=config):
+            if kind == 'segment':
+                found.setdefault(obj.net_id, []).append(obj)
+        return found
+
+    grazed = _tracks_within(config.clearance + grow)
+    pieces = _tracks_within(config.clearance + grow + width)
+    diff_pairs = getattr(state, 'diff_pair_by_net_id', None) or {}
+    tried = 0
+    for victim in sorted(grazed) + sorted(set(pieces) - set(grazed)):
+        if tried >= defaults.RESCUE_MAX_NEIGHBOUR_MOVES:
+            break
+        owner = routed_results.get(victim)
+        if owner is None or owner.get('is_existing_route'):
+            continue
+        if victim in diff_pairs:
+            continue
+        ids = {id(s) for s in pieces[victim]}
+        own = {id(s) for s in owner.get('new_segments') or []}
+        if not ids <= own or owner.get('leg_results'):
+            continue    # input copper, or copper this result does not write
+        if rip_refusal(pcb_data, victim, "rescue neighbour move", diff_pairs):
+            continue
+        tried += 1
+        lifted = {'new_segments': list(pieces[victim]), 'new_vias': []}
+        remove_route_from_pcb_data(pcb_data, lifted)
+        result, used = _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
+                                     island_points=island, nominal_only=True)
+        moved = None
+        if result is not None:
+            add_route_to_pcb_data(pcb_data, result)
+            moved = _close_net_at_nominal(pcb_data, victim, config, net_clearances)
+            if moved is None:
+                remove_route_from_pcb_data(pcb_data, result)
+        if moved is None:
+            add_route_to_pcb_data(pcb_data, lifted)
+            continue
+        # The gap's route goes back to the caller, which adds it and files it.
+        remove_route_from_pcb_data(pcb_data, result)
+        # Every entry that writes this net: an earlier fold can have left one
+        # of its own, `extends` naming the owner.
+        for _r in [owner] + [r for r in state.results if r.get('net_id') == victim]:
+            _r['new_segments'] = [s for s in _r.get('new_segments') or []
+                                  if id(s) not in ids]
+        _fold_into_result(state, owner, {
+            'net_name': owner.get('net_name'), 'net_id': victim,
+            'new_segments': [s for r in moved for s in r['new_segments']],
+            'new_vias': [v for r in moved for v in r.get('new_vias', [])],
+            'iterations': sum(r.get('iterations', 0) for r in moved)})
+        refresh_net_obstacles(getattr(state, 'working_obstacles', None),
+                              getattr(state, 'net_obstacles_cache', None),
+                              pcb_data, config, [victim])
+        record_net_event(state, victim, "rescue_moved_aside",
+                         {"for_net": net_id, "segments": len(ids)})
+        print(f"    moved {pcb_data.nets[victim].name} ({len(ids)} segment(s)) "
+              f"to route the gap at clearance {config.clearance:g}")
+        return result, used
+    return None
 
 
 def _tie_band_violations(pcb_data, net_id, cfg, segments):
@@ -1655,6 +1783,12 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
             if result is None:
                 failed_gaps.add(key)
                 continue
+            if used_cfg.clearance < config.clearance - 1e-9:
+                _moved = _move_neighbour_before_narrowing(
+                    state, net_id, gap, _isl, result, used_cfg, config,
+                    net_clearances)
+                if _moved is not None:
+                    result, used_cfg = _moved
             add_route_to_pcb_data(pcb_data, result,
                                   debug_lines=config.debug_lines)
             num_after, comp_points, comp_pads = _net_component_info(pcb_data,
