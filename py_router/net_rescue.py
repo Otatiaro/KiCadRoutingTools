@@ -21,10 +21,10 @@ Design constraints (#331/#371 review):
   - NO rip-up here: the rescue routes through free space only, and each
     committed edge is verified to reduce the net's component count on the
     real board (else it is removed again) - a failed rescue leaves the
-    board untouched. One exception, before a neck-down ships: the tracks
-    standing in the way of a route at the run's own rules may move, if that
-    route and their own reconnection both land at those rules
-    (_move_neighbour_before_narrowing), and go back if not.
+    board untouched. One exception, before the pass's last open gap ships a
+    neck-down: the tracks standing in the way of a route at the run's own
+    rules may move, if that route and their own reconnection both land at
+    those rules (_move_neighbour_before_narrowing), and go back if not.
   - Scoped, never board-global: a fresh obstacle map is built on a small
     window around the remaining GAP (the #329/#134 partial restores mean
     the gap is usually a short missing link, not the whole net).
@@ -928,7 +928,8 @@ def _move_neighbour_before_narrowing(state, net_id, gap, island, narrow_result,
     then routes at the run's own clearance and width, and the neighbour
     reconnects at them too, both stay. Anything less puts every piece back, so a
     failure leaves the board as it found it. A rung's clearance is a last
-    resort: moving a neighbour delivers what was asked for.
+    resort: moving a neighbour delivers what was asked for. The caller tries
+    this only on the pass's last open gap.
 
     Returns (result, cfg) for the gap, or None."""
     from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
@@ -1783,7 +1784,15 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
             if result is None:
                 failed_gaps.add(key)
                 continue
-            if used_cfg.clearance < config.clearance - 1e-9:
+            # A route at the run's rules takes more room than the neck-down, so
+            # the move waits until nothing else needs that room: this is the
+            # pass's last open gap. Moving earlier cost completion (watchy:
+            # +3V3 went back to its 0.3 width past EN, and SDA, next in line,
+            # no longer found a way out of U4).
+            if (used_cfg.clearance < config.clearance - 1e-9 and num == 2
+                    and not summary['unchanged'] and not summary['improved']
+                    and not any(_net_component_info(pcb_data, _later[1])[0] > 1
+                                for _later in candidates[_cand_idx + 1:])):
                 _moved = _move_neighbour_before_narrowing(
                     state, net_id, gap, _isl, result, used_cfg, config,
                     net_clearances)
