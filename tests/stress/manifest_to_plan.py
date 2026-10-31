@@ -48,6 +48,9 @@ TOOL_ACTIONS = {
 # only bumps a `skipped` counter -- a number, not a name -- so the converted
 # plan looks complete when it is not.
 REFUSED_TOOLS = {
+    'smooth_board.py': (
+        'smooths a whole finished board as the last chain step; the plan format '
+        'has no such step. Run it AFTER the plan, on the board the plan wrote'),
     'place_simple.py': (
         'places the board by its groups and one annealed objective; the plan '
         'format has no placement step. Run it BEFORE the plan and start the '
